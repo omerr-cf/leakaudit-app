@@ -49,6 +49,11 @@ export default defineConfig({
     },
   },
   plugins: [
+    // NOTE: allowedActionOrigins does NOT belong here — the installed
+    // @react-router/dev's reactRouter() Vite plugin takes zero options
+    // (confirmed against node_modules/@react-router/dev/dist/vite.d.ts).
+    // The real CSRF allow-list lives in react-router.config.ts at the
+    // project root — see that file for the explanation.
     reactRouter(),
     tsconfigPaths(),
   ],

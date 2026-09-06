@@ -34,7 +34,10 @@ model Session {
 }
 
 model ShopSettings {
-  id                 String  @id @default(cuid())
-  shop               String  @unique
-  weeklyAlertEnabled Boolean @default(false)
+  id                    String  @id @default(cuid())
+  shop                  String  @unique
+  weeklyAlertEnabled    Boolean @default(false)
+  shippingCostPerOrder  Float   @default(5.0)
+  targetMarginPercent   Float   @default(20)
+  notificationEmail     String?
 }

@@ -2,72 +2,150 @@
   align-items: center;
   display: flex;
   justify-content: center;
-  height: 100%;
+  min-height: 100vh;
   width: 100%;
   text-align: center;
-  padding: 1rem;
-}
-
-.heading,
-.text {
-  padding: 0;
-  margin: 0;
-}
-
-.text {
-  font-size: 1.2rem;
-  padding-bottom: 2rem;
+  padding: 2rem 1rem;
+  background: radial-gradient(circle at top, #f4fff8 0%, #eef1f6 55%, #e7ebf3 100%);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
 }
 
 .content {
   display: grid;
-  gap: 2rem;
+  gap: 1.25rem;
+  max-width: 42rem;
+  background: #ffffff;
+  border-radius: 1.25rem;
+  padding: 3rem 2.5rem;
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.06),
+    0 12px 32px rgba(16, 24, 40, 0.08);
+}
+
+.badge {
+  justify-self: center;
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #0f7a4d;
+  background: #e3f8ec;
+  border-radius: 999px;
+  padding: 0.35rem 0.9rem;
+}
+
+.heading {
+  padding: 0;
+  margin: 0;
+  font-size: 2.15rem;
+  line-height: 1.2;
+  color: #14181f;
+}
+
+.text {
+  padding: 0;
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.55;
+  color: #4a5163;
 }
 
 .form {
   display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  margin: 0 auto;
-  gap: 1rem;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 0.5rem auto 0;
+  gap: 0.75rem;
 }
 
 .label {
   display: grid;
-  gap: 0.2rem;
-  max-width: 20rem;
+  gap: 0.3rem;
+  width: 20rem;
+  max-width: 100%;
   text-align: left;
-  font-size: 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #14181f;
+}
+
+.hint {
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: #8a8f9c;
 }
 
 .input {
-  padding: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #d5d8e0;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #0f7a4d;
+  box-shadow: 0 0 0 3px rgba(15, 122, 77, 0.15);
 }
 
 .button {
-  padding: 0.4rem;
+  padding: 0.7rem 1.4rem;
+  margin-top: 1.55rem;
+  background: #0f7a4d;
+  color: #ffffff;
+  border: none;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.button:hover {
+  background: #0c623d;
 }
 
 .list {
   list-style: none;
   padding: 0;
-  padding-top: 3rem;
+  padding-top: 1.5rem;
   margin: 0;
+  border-top: 1px solid #edeef2;
   display: flex;
-  gap: 2rem;
-}
-
-.list > li {
-  max-width: 20rem;
+  gap: 1.75rem;
   text-align: left;
 }
 
+.list > li {
+  flex: 1;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #4a5163;
+}
+
+.list > li > strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: #14181f;
+}
+
 @media only screen and (max-width: 50rem) {
+  .content {
+    padding: 2.25rem 1.5rem;
+  }
+
+  .heading {
+    font-size: 1.7rem;
+  }
+
   .list {
     display: block;
   }
 
   .list > li {
-    padding-bottom: 1rem;
+    padding-bottom: 1.1rem;
   }
 }

@@ -21,6 +21,14 @@ api_version = "2026-10"
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
+  # Mandatory GDPR/CCPA compliance "webhooks" are NOT regular topic
+  # subscriptions (that's why the CLI rejected them there) — they're a
+  # separate, dedicated config block. Same 3 route files still handle them.
+  [webhooks.privacy_compliance]
+  customer_data_request_url = "/webhooks/customers/data_request"
+  customer_deletion_url = "/webhooks/customers/redact"
+  shop_deletion_url = "/webhooks/shop/redact"
+
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]
 
