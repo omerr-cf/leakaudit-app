@@ -32,3 +32,9 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+model ShopSettings {
+  id                 String  @id @default(cuid())
+  shop               String  @unique
+  weeklyAlertEnabled Boolean @default(false)
+}
