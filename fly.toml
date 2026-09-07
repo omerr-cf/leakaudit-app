@@ -1,0 +1,38 @@
+# Fly.io config for LeakAudit (Shopify embedded app, React Router +
+# Prisma/SQLite). Hand-authored ahead of `fly launch` so the volume mount
+# and persistent-SQLite wiring are already correct — `fly launch --no-deploy`
+# will likely detect this file and ask whether to keep it; say yes, then
+# confirm/adjust the app name and primary_region prompts for your account.
+#
+# app name must be globally unique across ALL Fly.io accounts — rename this
+# before your first `fly launch` / `fly deploy` if "leakaudit-app" is taken.
+app = "leakaudit-app"
+primary_region = "iad"
+kill_signal = "SIGINT"
+kill_timeout = "5s"
+
+[build]
+
+[env]
+PORT = "3000"
+NODE_ENV = "production"
+
+# Persistent disk for the SQLite database file. Created separately with
+# `fly volumes create data --size 1` — the size here is just documentation,
+# the real size is set at volume-creation time.
+[mounts]
+source = "data"
+destination = "/data"
+
+[http_service]
+internal_port = 3000
+force_https = true
+auto_stop_machines = false
+auto_start_machines = true
+min_machines_running = 1
+processes = ["app"]
+
+[[vm]]
+memory = "1gb"
+cpu_kind = "shared"
+cpus = 1

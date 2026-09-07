@@ -10,7 +10,11 @@ generator client {
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  // Local dev keeps using the plain file (set in .env as
+  // DATABASE_URL="file:dev.sqlite"). In production (Fly.io) this points at
+  // a path on the persistent volume instead — see fly.toml /
+  // Dockerfile.
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -34,10 +38,41 @@ model Session {
 }
 
 model ShopSettings {
-  id                    String  @id @default(cuid())
-  shop                  String  @unique
-  weeklyAlertEnabled    Boolean @default(false)
-  shippingCostPerOrder  Float   @default(5.0)
-  targetMarginPercent   Float   @default(20)
+  id                    String    @id @default(cuid())
+  shop                  String    @unique
+  weeklyAlertEnabled    Boolean   @default(false)
+  shippingCostPerOrder  Float     @default(5.0)
+  targetMarginPercent   Float     @default(20)
   notificationEmail     String?
+  // Review-request banner (dashboard): null = never interacted with it.
+  // Set when the merchant clicks "Leave a Quick Review" — banner never
+  // shows again for this shop once this is set.
+  reviewBannerDismissedAt DateTime?
+  // Set when the merchant clicks "Remind Me Later" — banner stays hidden
+  // until this timestamp passes, then becomes eligible to show again.
+  reviewBannerRemindAt    DateTime?
+}
+
+// One row per completed scan. Lets the dashboard show a merchant their
+// health-score/leak trend over time instead of only "right now" — the
+// "prove we're actually saving you money" ask.
+model AuditSnapshot {
+  id               String   @id @default(cuid())
+  shop             String
+  scannedAt        DateTime @default(now())
+  healthScore      Int
+  totalMonthlyLeak Float
+  currencyCode     String
+
+  @@index([shop, scannedAt])
+}
+
+// Free-text feedback submitted from inside the app.
+model Feedback {
+  id        String   @id @default(cuid())
+  shop      String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([shop, createdAt])
 }

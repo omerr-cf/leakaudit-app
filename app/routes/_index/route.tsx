@@ -66,6 +66,10 @@ export default function App() {
             — you don't have to keep checking.
           </li>
         </ul>
+
+        <p className={styles.footerLink}>
+          <a href="/about">See exactly how we calculate these numbers →</a>
+        </p>
       </div>
     </div>
   );

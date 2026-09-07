@@ -1,9 +1,19 @@
-import type { authenticate } from "../shopify.server";
-
-// Derives the admin GraphQL client's type directly from your generated
-// shopify.server.ts, so this always matches whatever Shopify API version
-// your app is actually running — no guessing package/type names.
-type AdminContext = Awaited<ReturnType<typeof authenticate.admin>>["admin"];
+// A minimal structural type for the subset of Shopify's admin GraphQL
+// client this file actually calls. Using this instead of pulling the full
+// type off `authenticate.admin` (which was the original approach) means:
+//   1. This file has zero import-time dependency on shopify.server.ts, so
+//      it can be unit-tested with a plain fake object — no Shopify app
+//      instance, no OAuth, no network — see audit.server.test.ts.
+//   2. The real admin client Shopify hands routes still satisfies this
+//      type automatically (TypeScript is structural), so nothing else
+//      changes.
+export interface AdminGraphQLClient {
+  graphql(
+    query: string,
+    options?: { variables?: Record<string, unknown> },
+  ): Promise<{ json(): Promise<unknown> }>;
+}
+type AdminContext = AdminGraphQLClient;
 
 /**
  * LeakAudit — Core Audit Engine
@@ -58,13 +68,27 @@ const FX_MARKUP_ESTIMATE = 0.018; // 1.8% assumed drag on cross-border presentme
 const RETURN_RATE_BENCHMARK = 0.08; // 8% treated as "normal" for general e-commerce
 const LOOKBACK_DAYS = 60;
 
+// Shopify's native bulk editor, filtered to just price + cost-per-item so
+// a merchant can fix every underpriced/uncosted variant on one
+// spreadsheet-like screen instead of opening products one at a time.
+// NOTE: the originally-requested URL also included
+// "metafields.pricing.cost" — that's not a real Shopify field (cost is
+// InventoryItem.unitCost, not a custom metafield most stores have), so it
+// was dropped here; adding it back would either be silently ignored or
+// error depending on Shopify's version. This is also routed through
+// adminUrl() in the dashboard, which already prepends
+// "https://admin.shopify.com/store/<handle>", so no extra "/admin" prefix
+// is needed here.
+const BULK_EDIT_VARIANT_COSTS_PATH =
+  "/bulk?resource_name=ProductVariant&edit=price,inventory_item.cost";
+
 // Health score: start at 100, deduct per problem found. "insufficient_data"
 // doesn't count against you — it just means the check hasn't got enough
 // data yet, not that something's wrong.
 const HEALTH_PENALTY_LEAKING = 15;
 const HEALTH_PENALTY_ERROR = 5;
 
-function computeHealthScore(leaks: LeakResult[]): number {
+export function computeHealthScore(leaks: LeakResult[]): number {
   let score = 100;
   for (const leak of leaks) {
     if (leak.status === "leaking") score -= HEALTH_PENALTY_LEAKING;
@@ -125,7 +149,7 @@ export async function runAudit(
   };
 }
 
-function errorLeak(
+export function errorLeak(
   id: LeakResult["id"],
   title: string,
   err: unknown,
@@ -177,7 +201,7 @@ const FX_QUERY = `#graphql
   }
 `;
 
-async function auditPaymentFxLeak(
+export async function auditPaymentFxLeak(
   admin: AdminContext,
   shopCurrency: string,
 ): Promise<LeakResult> {
@@ -193,6 +217,7 @@ async function auditPaymentFxLeak(
       "fx_fees",
       "Payment & FX Fee Drag",
       "No orders in the last 30 days yet — place a test order to see this check run.",
+      { label: "View Orders", href: "/orders" },
     );
   }
 
@@ -226,7 +251,7 @@ async function auditPaymentFxLeak(
         ? `${Math.round(crossBorderShare * 100)}% of your last 30 days of revenue was in a foreign presentment currency, estimated at a ${(FX_MARKUP_ESTIMATE * 100).toFixed(1)}% conversion drag.`
         : "No meaningful cross-border currency exposure detected in the last 30 days.",
     actionLabel: "Review FX Routing",
-    actionHref: "shopify:admin/settings/payments",
+    actionHref: "/settings/payments",
     details: {
       crossBorderRevenue: round2(crossBorderRevenue),
       totalRevenue: round2(totalRevenue),
@@ -284,7 +309,7 @@ const KNOWN_ORPHAN_SIGNATURES: { pattern: RegExp; label: string }[] = [
   { pattern: /rebuy/i, label: "Rebuy upsell" },
 ];
 
-async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult> {
+export async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult> {
   const response = await admin.graphql(THEME_QUERY);
   const data = (await response.json()) as { data: ThemesResponse };
   const theme = data.data?.themes?.nodes?.[0];
@@ -295,6 +320,7 @@ async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult> {
       "app_bloat",
       "Leftover App Script Bloat",
       "Couldn't read theme.liquid — check that the store has an active published theme to scan.",
+      { label: "View Themes", href: "/themes" },
     );
   }
 
@@ -313,7 +339,7 @@ async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult> {
         ? `Found ${found.length} leftover script${found.length > 1 ? "s" : ""} from apps you may no longer use: ${found.map((f) => f.label).join(", ")}.`
         : "No known orphaned app scripts detected in your live theme.",
     actionLabel: "Clean Leftover Scripts",
-    actionHref: "shopify:admin/themes/current/editor",
+    actionHref: "/themes/current/editor",
     details: { matches: found.map((f) => f.label), themeName: theme?.name },
   };
 }
@@ -325,7 +351,7 @@ interface VariantNode {
   id: string;
   title: string;
   price: string;
-  product?: { title?: string };
+  product?: { id?: string; title?: string };
   inventoryItem?: { unitCost?: { amount?: string } };
 }
 interface VariantsResponse {
@@ -340,7 +366,7 @@ const VARIANTS_QUERY = `#graphql
           id
           title
           price
-          product { title }
+          product { id title }
           inventoryItem {
             unitCost { amount }
           }
@@ -356,9 +382,13 @@ interface MarginOffender {
   cost: number;
   netMargin: number;
   marginPercent: number;
+  // Relative admin path to this exact product's edit page, so the
+  // dashboard can link straight to the offending SKU instead of just the
+  // generic Products list. Null if we couldn't extract a usable id.
+  actionHref: string | null;
 }
 
-async function auditNegativeMarginSkus(
+export async function auditNegativeMarginSkus(
   admin: AdminContext,
   settings: AuditSettings,
 ): Promise<LeakResult> {
@@ -373,6 +403,7 @@ async function auditNegativeMarginSkus(
       "negative_margin",
       "Negative-Margin SKUs",
       "No in-stock variants found yet — add products with inventory to run this check.",
+      { label: "View Products", href: "/products" },
     );
   }
 
@@ -384,6 +415,7 @@ async function auditNegativeMarginSkus(
       "negative_margin",
       "Negative-Margin SKUs",
       `Set cost-per-item on your top SKUs to unlock margin tracking (0 of ${variants.length} variants have a cost set).`,
+      { label: "Set Cost Per Item", href: BULK_EDIT_VARIANT_COSTS_PATH },
     );
   }
 
@@ -393,12 +425,14 @@ async function auditNegativeMarginSkus(
       const cost = parseFloat(e.node.inventoryItem?.unitCost?.amount ?? "0");
       const netMargin = price - cost - settings.shippingCostPerOrder;
       const marginPercent = price > 0 ? (netMargin / price) * 100 : 0;
+      const productId = numericId(e.node.product?.id);
       return {
         title: `${e.node.product?.title ?? ""} — ${e.node.title}`,
         price,
         cost,
         netMargin,
         marginPercent,
+        actionHref: productId ? `/products/${productId}` : null,
       };
     })
     .filter((v) => v.marginPercent < settings.targetMarginPercent)
@@ -420,8 +454,8 @@ async function auditNegativeMarginSkus(
       offenders.length > 0
         ? `${offenders.length} SKU${offenders.length > 1 ? "s are" : " is"} selling below your ${settings.targetMarginPercent}% target margin after estimated shipping cost.`
         : `All SKUs are meeting your ${settings.targetMarginPercent}% target margin after estimated shipping.`,
-    actionLabel: "Fix Negative Margin SKUs",
-    actionHref: "shopify:admin/products",
+    actionLabel: "Set Cost Per Item",
+    actionHref: BULK_EDIT_VARIANT_COSTS_PATH,
     details: {
       skusChecked: withCost.length,
       skusMissingCost: variants.length - withCost.length,
@@ -461,7 +495,7 @@ const REFUNDS_QUERY = `#graphql
   }
 `;
 
-async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
+export async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
   const since = daysAgoIso(LOOKBACK_DAYS);
   const response = await admin.graphql(REFUNDS_QUERY, {
     variables: { first: 250, query: `created_at:>=${since}` },
@@ -474,12 +508,16 @@ async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
       "return_drift",
       "Return Rate Drift",
       `Only ${orders.length} order(s) in the last ${LOOKBACK_DAYS} days — need more order volume for a reliable return rate.`,
+      { label: "View Orders", href: "/orders" },
     );
   }
 
   let totalRevenue = 0;
   let totalRefunded = 0;
   let refundedOrderCount = 0;
+  // A few specific refunded orders, so the dashboard can link straight to
+  // them instead of only the generic Orders list.
+  const refundedOrders: { id: string; actionHref: string }[] = [];
 
   for (const { node } of orders) {
     const orderTotal = parseFloat(
@@ -491,7 +529,13 @@ async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
         sum + parseFloat(r.totalRefundedSet?.shopMoney?.amount ?? "0"),
       0,
     );
-    if (refundedForOrder > 0) refundedOrderCount += 1;
+    if (refundedForOrder > 0) {
+      refundedOrderCount += 1;
+      const orderId = numericId(node.id);
+      if (orderId && refundedOrders.length < 5) {
+        refundedOrders.push({ id: orderId, actionHref: `/orders/${orderId}` });
+      }
+    }
     totalRefunded += refundedForOrder;
   }
 
@@ -509,12 +553,13 @@ async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
         ? `Your return rate is ${(returnRate * 100).toFixed(1)}%, ${(drift * 100).toFixed(1)}pp above the ${(RETURN_RATE_BENCHMARK * 100).toFixed(0)}% benchmark.`
         : `Return rate is ${(returnRate * 100).toFixed(1)}%, within the normal range.`,
     actionLabel: "Investigate Return Drivers",
-    actionHref: "shopify:admin/orders?status=refunded",
+    actionHref: "/orders",
     details: {
       returnRate: round2(returnRate * 100),
       totalRefunded: round2(totalRefunded),
       totalRevenue: round2(totalRevenue),
       ordersAnalyzed: orders.length,
+      refundedOrders,
     },
   };
 }
@@ -522,10 +567,13 @@ async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
 // ---------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------
-function insufficientData(
+export function insufficientData(
   id: LeakResult["id"],
   title: string,
   message: string,
+  // Sends "Learn More" somewhere actually useful instead of a dead "#" —
+  // wherever a merchant would go to unblock this specific check.
+  action?: { label: string; href: string },
 ): LeakResult {
   return {
     id,
@@ -533,17 +581,25 @@ function insufficientData(
     status: "insufficient_data",
     monthlyImpact: 0,
     headline: message,
-    actionLabel: "Learn More",
-    actionHref: "#",
+    actionLabel: action?.label ?? "Learn More",
+    actionHref: action?.href ?? "#",
   };
 }
 
-function daysAgoIso(days: number): string {
+export function daysAgoIso(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d.toISOString().slice(0, 10);
 }
 
-function round2(n: number): number {
+export function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+// Shopify GraphQL ids look like "gid://shopify/Product/123456789" — Admin
+// URLs (e.g. /products/123456789) just want the trailing numeric id.
+export function numericId(gid: string | undefined): string | null {
+  if (!gid) return null;
+  const match = gid.match(/(\d+)$/);
+  return match ? match[1] : null;
 }
