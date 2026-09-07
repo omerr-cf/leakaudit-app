@@ -62,8 +62,8 @@ export default function App() {
           </li>
           <li>
             <strong>A weekly heads-up, not a homework assignment.</strong>
-            Turn on alerts and we'll tell you the moment a new leak shows up
-            — you don't have to keep checking.
+            Turn on alerts and we&apos;ll tell you the moment a new leak shows up
+            — you don&apos;t have to keep checking.
           </li>
         </ul>
 

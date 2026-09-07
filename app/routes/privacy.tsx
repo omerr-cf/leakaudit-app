@@ -21,9 +21,9 @@ export default function Privacy() {
       </p>
 
       <p>
-        LeakAudit ("the App") is a Shopify app that scans store data to identify
+        LeakAudit (&quot;the App&quot;) is a Shopify app that scans store data to identify
         potential sources of lost revenue. This policy explains what data the
-        App accesses, why, and how it's handled.
+        App accesses, why, and how it&apos;s handled.
       </p>
 
       <h2>What we access</h2>
@@ -39,7 +39,7 @@ export default function Privacy() {
           identify SKUs selling below your target margin.
         </li>
         <li>
-          <strong>Themes</strong> — your published theme's code, to detect
+          <strong>Themes</strong> — your published theme&apos;s code, to detect
           leftover snippets from apps you may have uninstalled.
         </li>
         <li>
@@ -63,14 +63,14 @@ export default function Privacy() {
       <h2>Data sharing</h2>
       <p>
         We do not sell or share your data with third parties. Data is used
-        solely to power the App's own dashboard for your store.
+        solely to power the App&apos;s own dashboard for your store.
       </p>
 
       <h2>Data retention and deletion</h2>
       <p>
         If you uninstall the App, your stored settings and scan history are
         deleted. You can request deletion of your data at any time by contacting
-        us (see below) — this is also handled automatically via Shopify's
+        us (see below) — this is also handled automatically via Shopify&apos;s
         mandatory GDPR compliance webhooks.
       </p>
 

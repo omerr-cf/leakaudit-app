@@ -16,10 +16,10 @@ export default function About() {
     >
       <h1>How LeakAudit calculates its numbers</h1>
       <p>
-        LeakAudit runs four independent checks against your store's real
+        LeakAudit runs four independent checks against your store&apos;s real
         Shopify data every time you scan. Every number below comes from a
         documented, fixed formula — never a guess, and never anything made
-        up to look impressive. Here's exactly how each one works, including
+        up to look impressive. Here&apos;s exactly how each one works, including
         the assumptions baked in, so you can judge for yourself how much to
         trust it.
       </p>
@@ -27,19 +27,19 @@ export default function About() {
       <h2>1. Payment &amp; FX Fee Drag</h2>
       <p>
         We look at your last 30 days of orders and add up the ones placed in
-        a currency different from your store's own (a "foreign presentment
-        currency"). We estimate a <strong>1.8% conversion drag</strong> on
+        a currency different from your store&apos;s own (a &quot;foreign presentment
+        currency&quot;). We estimate a <strong>1.8% conversion drag</strong> on
         that revenue — a conservative industry rule of thumb for the
         combined cost of currency conversion and cross-border card fees.
-        That's it: cross-border revenue × 1.8% = the monthly estimate you
-        see. We don't yet read your actual payment gateway's fee schedule,
+        That&apos;s it: cross-border revenue × 1.8% = the monthly estimate you
+        see. We don&apos;t yet read your actual payment gateway&apos;s fee schedule,
         so treat this as a directional estimate, not an invoice-accurate
         figure.
       </p>
 
       <h2>2. Leftover App Script Bloat</h2>
       <p>
-        We read your live theme's code and check it against a short list of
+        We read your live theme&apos;s code and check it against a short list of
         known snippets left behind by popular apps (review widgets, popups,
         tracking scripts, and similar) after a merchant uninstalls the app
         but the leftover code stays in the theme. Each match found is
@@ -52,7 +52,7 @@ export default function About() {
       <p>
         For every in-stock product variant that has a cost-per-item set, we
         calculate: <code>price − cost − your shipping assumption</code>. If
-        that's below your target margin percentage (both configurable in
+        that&apos;s below your target margin percentage (both configurable in
         Settings — default $5.00 shipping, 20% target margin), the SKU is
         flagged. The monthly impact assumes roughly 3 units sold per month
         for each flagged SKU — a placeholder until real per-SKU sales
@@ -68,27 +68,27 @@ export default function About() {
         for general e-commerce). If your rate is meaningfully above that,
         we estimate the monthly cost from your actual refunded amounts,
         scaled to a 30-day figure. We need at least 5 orders in the window
-        to compute a rate we're willing to show you — fewer than that, and
-        we tell you honestly that there isn't enough data yet rather than
+        to compute a rate we&apos;re willing to show you — fewer than that, and
+        we tell you honestly that there isn&apos;t enough data yet rather than
         showing a misleading percentage.
       </p>
 
       <h2>Your Health Score</h2>
       <p>
-        Starts at 100. Each check that's actively "Leaking" costs 15 points;
-        each check that hit an error (couldn't complete, usually a
+        Starts at 100. Each check that&apos;s actively &quot;Leaking&quot; costs 15 points;
+        each check that hit an error (couldn&apos;t complete, usually a
         permissions or connectivity issue on our end) costs 5 points. A
-        check that just needs more setup or data doesn't cost you anything —
-        we don't penalize you for us not having enough information yet.
+        check that just needs more setup or data doesn&apos;t cost you anything —
+        we don&apos;t penalize you for us not having enough information yet.
       </p>
 
-      <h2>What we don't do</h2>
+      <h2>What we don&apos;t do</h2>
       <p>
-        We never estimate a number we can't trace back to a formula like the
-        ones above. We don't use AI or machine-learning "black box"
+        We never estimate a number we can&apos;t trace back to a formula like the
+        ones above. We don&apos;t use AI or machine-learning &quot;black box&quot;
         predictions for any of these figures. Every check either has enough
         real data to compute a real number, or it tells you plainly that it
-        doesn't yet.
+        doesn&apos;t yet.
       </p>
     </main>
   );

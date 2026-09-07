@@ -193,7 +193,7 @@ export default function Settings() {
             Send Test Alert Now
           </s-button>
           <s-paragraph color="subdued">
-            This sends one email immediately — it doesn't yet run automatically
+            This sends one email immediately — it doesn&apos;t yet run automatically
             on a weekly schedule (that needs the app deployed somewhere that can
             run a schedule, not just your laptop).
           </s-paragraph>
@@ -203,7 +203,7 @@ export default function Settings() {
       <s-section heading="Feedback You've Sent">
         {data.feedback.length === 0 ? (
           <s-paragraph color="subdued">
-            Nothing yet — anything you type into the "Send Us Feedback" box on
+            Nothing yet — anything you type into the &quot;Send Us Feedback&quot; box on
             the Home tab will show up here, permanently saved, whether or not
             email notifications are set up.
           </s-paragraph>

@@ -669,11 +669,11 @@ export default function Index() {
                           fxDetails.shopCurrency,
                         )}{" "}
                         total revenue ({crossBorderPercent}%) came from orders
-                        placed in a currency other than your store's default (
+                        placed in a currency other than your store&apos;s default (
                         {fxDetails.shopCurrency}).
                       </s-paragraph>
                       <s-paragraph color="subdued">
-                        At an estimated 1.8% conversion &amp; FX drag, that's
+                        At an estimated 1.8% conversion &amp; FX drag, that&apos;s
                         the{" "}
                         {formatMoney(
                           leak.monthlyImpact,
@@ -703,7 +703,7 @@ export default function Index() {
                       </s-stack>
                       <s-paragraph color="subdued">
                         These are usually left behind by an app you uninstalled.
-                        Removing the snippet from your theme code won't break
+                        Removing the snippet from your theme code won&apos;t break
                         anything — the app it was talking to is already gone.
                       </s-paragraph>
                     </>
@@ -797,7 +797,7 @@ export default function Index() {
         <s-stack direction="block" gap="base">
           {liveSavings.recoveredMonthlyEstimate > 0 ? (
             <s-paragraph>
-              You've cut your estimated monthly leak by{" "}
+              You&apos;ve cut your estimated monthly leak by{" "}
               <strong>
                 {formatMoney(
                   liveSavings.recoveredMonthlyEstimate,
@@ -808,7 +808,7 @@ export default function Index() {
             </s-paragraph>
           ) : (
             <s-paragraph>
-              We'll show your savings here once a scan shows a lower total leak
+              We&apos;ll show your savings here once a scan shows a lower total leak
               than your first one did.
             </s-paragraph>
           )}

@@ -22,7 +22,7 @@ export default function Terms() {
       <h2>The service</h2>
       <p>
         LeakAudit provides estimated, informational scans of your Shopify
-        store's orders, products, and theme to surface potential sources of lost
+        store&apos;s orders, products, and theme to surface potential sources of lost
         revenue. Estimates are based on the assumptions and thresholds you
         configure (or their defaults) and are provided for informational
         purposes only — they are not financial, accounting, or tax advice, and
@@ -31,17 +31,17 @@ export default function Terms() {
 
       <h2>Your responsibilities</h2>
       <p>
-        You're responsible for the accuracy of the settings you configure
+        You&apos;re responsible for the accuracy of the settings you configure
         (target margin, shipping cost assumption) and for verifying that any
-        changes you make in response to the App's suggestions are correct for
+        changes you make in response to the App&apos;s suggestions are correct for
         your business.
       </p>
 
       <h2>Availability</h2>
       <p>
-        We aim to keep the App available and accurate, but we don't guarantee
+        We aim to keep the App available and accurate, but we don&apos;t guarantee
         uninterrupted access or that every estimate is error-free. The App is
-        provided "as is," without warranties of any kind.
+        provided &quot;as is,&quot; without warranties of any kind.
       </p>
 
       <h2>Billing</h2>
