@@ -2,7 +2,7 @@
 
 client_id = "3b5893fa2c28bfdd6c2e2672b9591885"
 name = "leakaudit-app"
-application_url = "https://example.com"
+application_url = "https://leakaudit-app.fly.dev"
 embedded = true
 
 [access_scopes]
@@ -30,7 +30,7 @@ api_version = "2026-10"
   shop_deletion_url = "/webhooks/shop/redact"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://leakaudit-app.fly.dev/api/auth" ]
 
 [build]
 include_config_on_deploy = true
