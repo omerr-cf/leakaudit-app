@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   auditAppBloatLeak,
   auditNegativeMarginSkus,
@@ -577,3 +577,187 @@ describe("auditAppBloatLeak — multiple matches", () => {
   });
 });
 
+// ---------------------------------------------------------------
+// GraphQL throttle-retry + VARIANTS_QUERY pagination
+// ---------------------------------------------------------------
+// These exercise graphqlWithRetry() and the auditNegativeMarginSkus()
+// pagination loop indirectly (both are internal, not exported) by driving
+// the audit functions that call them with a hand-rolled admin fake that
+// varies its response across calls — fakeAdmin() above can't do that
+// since it returns one canned response per query regardless of call count.
+describe("GraphQL throttle retry", () => {
+  it("retries once on THROTTLED and then succeeds", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const admin: AdminGraphQLClient = {
+      async graphql() {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            json: async () => ({
+              errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+            }),
+          };
+        }
+        return {
+          json: async () => ({
+            data: {
+              themes: {
+                nodes: [
+                  {
+                    id: "gid://shopify/OnlineStoreTheme/1",
+                    name: "Dawn",
+                    files: {
+                      nodes: [{ filename: "layout/theme.liquid", body: { content: "<html></html>" } }],
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      },
+    };
+    const resultPromise = auditAppBloatLeak(admin);
+    await vi.advanceTimersByTimeAsync(1000); // the 1s backoff before the 2nd attempt
+    const result = await resultPromise;
+    expect(calls).toBe(2);
+    expect(result.status).toBe("ok");
+    vi.useRealTimers();
+  });
+
+  it("gives up after the max retry count instead of retrying forever", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const admin: AdminGraphQLClient = {
+      async graphql() {
+        calls += 1;
+        return {
+          json: async () => ({
+            errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+          }),
+        };
+      },
+    };
+    const resultPromise = auditAppBloatLeak(admin);
+    // Backoff schedule is 1s, 2s, 4s, 8s (4 retries) — 20s covers all of it.
+    await vi.advanceTimersByTimeAsync(20000);
+    const result = await resultPromise;
+    expect(calls).toBe(5); // 1 initial attempt + 4 retries, then it stops
+    // Every retry came back throttled with no `data`, so the audit treats
+    // it as "couldn't read theme.liquid" rather than hanging or throwing.
+    expect(result.status).toBe("insufficient_data");
+    vi.useRealTimers();
+  });
+
+  it("does not retry a non-THROTTLED GraphQL error", async () => {
+    let calls = 0;
+    const admin: AdminGraphQLClient = {
+      async graphql() {
+        calls += 1;
+        return {
+          json: async () => ({
+            errors: [{ message: "Field not found", extensions: { code: "GRAPHQL_VALIDATION_FAILED" } }],
+          }),
+        };
+      },
+    };
+    const result = await auditAppBloatLeak(admin);
+    expect(calls).toBe(1);
+    expect(result.status).toBe("insufficient_data");
+  });
+});
+
+describe("auditNegativeMarginSkus — pagination", () => {
+  it("follows pageInfo.hasNextPage across multiple pages", async () => {
+    let calls = 0;
+    const admin: AdminGraphQLClient = {
+      async graphql(_query: string, options?: { variables?: Record<string, unknown> }) {
+        calls += 1;
+        const after = options?.variables?.after;
+        if (!after) {
+          return {
+            json: async () => ({
+              data: {
+                productVariants: {
+                  edges: [
+                    {
+                      node: {
+                        id: "v1",
+                        title: "Default",
+                        price: "20.00",
+                        product: { title: "Widget" },
+                        inventoryItem: { unitCost: { amount: "16.00" } },
+                      },
+                    },
+                  ],
+                  pageInfo: { hasNextPage: true, endCursor: "cursor1" },
+                },
+              },
+            }),
+          };
+        }
+        expect(after).toBe("cursor1");
+        return {
+          json: async () => ({
+            data: {
+              productVariants: {
+                edges: [
+                  {
+                    node: {
+                      id: "v2",
+                      title: "Default",
+                      price: "50.00",
+                      product: { title: "Gadget" },
+                      inventoryItem: { unitCost: { amount: "10.00" } },
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      },
+    };
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    expect(calls).toBe(2);
+    const details = result.details as { skusChecked: number };
+    expect(details.skusChecked).toBe(2);
+  });
+
+  it("stops at the page cap even if hasNextPage keeps saying true", async () => {
+    let calls = 0;
+    const admin: AdminGraphQLClient = {
+      async graphql() {
+        calls += 1;
+        return {
+          json: async () => ({
+            data: {
+              productVariants: {
+                edges: [
+                  {
+                    node: {
+                      id: `v${calls}`,
+                      title: "Default",
+                      price: "100.00",
+                      product: { title: "Widget" },
+                      inventoryItem: { unitCost: { amount: "10.00" } },
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: true, endCursor: `cursor${calls}` },
+              },
+            },
+          }),
+        };
+      },
+    };
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    // 8 pages fetched (VARIANTS_PAGE_CAP), never an infinite loop, even
+    // though the fake server claims there's always another page.
+    expect(calls).toBe(8);
+    const details = result.details as { skusChecked: number };
+    expect(details.skusChecked).toBe(8);
+  });
+});

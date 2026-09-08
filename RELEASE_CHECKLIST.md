@@ -1,7 +1,7 @@
 # LeakAudit — Release Checklist
 
 **Status:** Pre-beta / pre-deployment
-**Last updated:** 2026-09-07
+**Last updated:** 2026-09-08
 **Scope:** This document is the single source of truth for what LeakAudit actually does today, what must be verified before real merchants touch it, how to test it, and the launch/monetization plan. It replaces informal notes with values pulled directly from the current codebase (`app/services/audit.server.ts`, `app/shopify.server.ts`, `app/routes/app*.tsx`).
 
 > A note on an earlier draft of this checklist: a version of this document was drafted externally (by another AI) before this one. Several of its claims didn't match the actual code — most importantly, it implied GraphQL rate-limiting is handled (it isn't) and used a slightly wrong framing for the FX check (it's an *estimate*, not a real fee lookup). This version corrects those points and is grounded in the real source.
@@ -36,7 +36,7 @@ Below is the exact math and data source for each.
 
 **What it measures:** product variants that are losing money once landed cost and a flat shipping allowance are subtracted from price.
 
-- **Data source:** Shopify Admin GraphQL, `productVariants(first: 250, query: "inventory_quantity:>0")`, selecting `price` and `inventoryItem.unitCost.amount`.
+- **Data source:** Shopify Admin GraphQL, `productVariants(first: 250, after: $cursor, query: "inventory_quantity:>0")`, selecting `price` and `inventoryItem.unitCost.amount`. Paginates via `pageInfo.hasNextPage`/`endCursor` up to 8 pages (2,000 variants) so stores with >250 in-stock variants are no longer silently truncated.
 - **Formula (per variant):**
   ```
   netMargin     = price − unitCost − shippingCostPerOrder     (shippingCostPerOrder default = $5.00)
@@ -87,7 +87,7 @@ Below is the exact math and data source for each.
 | Area | What to verify | Current status |
 |---|---|---|
 | **OAuth flow** | App installs cleanly on a fresh dev store; session token issued and refreshed without manual code. | ✅ Verified live on Fly.io (Sep 7): `GET /auth?shop=...` returns a clean 200 and correctly redirects into the embedded Shopify Admin frame (`admin.shopify.com/store/leakaudit-test-store/apps/leakaudit-app`). ⚠️ Found and fixed one real bug during this check: the standalone `/auth/login` page (manual "type your shop domain" form) threw `Error: Bad Request` on submit — React Router's single-fetch data protocol can't carry the cross-origin redirect that `shopify.login()` throws. Fixed by adding `reloadDocument` to the `<Form>` in `app/routes/auth.login/route.tsx` (forces a real full-page POST instead of a client-side fetch) — **this fix is committed to disk but not yet deployed; run `fly deploy` to ship it.** ❓ Still needs a real-browser check: the embedded dashboard content area appeared blank when loaded through an automated browser session — unclear yet if that is a genuine bug or a browser-automation artifact. Open the app from the dev store in your own normal Chrome window and confirm the dashboard actually renders before checking this row off. |
-| **GraphQL rate limits** | Confirm the app degrades gracefully if Shopify throttles a request. | ⚠️ **Not implemented.** All 4 audit queries (`FX_QUERY`, `THEME_QUERY`, `VARIANTS_QUERY`, `REFUNDS_QUERY`) fetch `first: 250` with no `THROTTLED`-error retry/backoff and no pagination past 250 records. On a store with >250 orders or variants in the lookback window, the audit will silently look at only the first 250 (understating impact) rather than erroring. This is an honest, currently-open gap — acceptable for a small private beta of low-to-mid-volume stores, but should be fixed (basic cost-aware retry + pagination) before any paid/high-volume rollout. |
+| **GraphQL rate limits** | Confirm the app degrades gracefully if Shopify throttles a request. | ✅ **Fixed (Sep 8).** All 4 audit queries (`FX_QUERY`, `THEME_QUERY`, `VARIANTS_QUERY`, `REFUNDS_QUERY`) now go through a shared `graphqlWithRetry()` wrapper in `audit.server.ts`: any GraphQL error with `extensions.code === "THROTTLED"` is retried with exponential backoff (1s, 2s, 4s, 8s — 4 retries max) instead of failing the check outright. Separately, `VARIANTS_QUERY` (the negative-margin check) now follows Shopify’s `pageInfo.hasNextPage`/`endCursor` cursor across up to 8 pages (2,000 in-stock variants) instead of silently stopping at the first 250. `FX_QUERY` and `REFUNDS_QUERY` still only look at the first 250 orders in their respective lookback windows (30/60 days) — for stores that genuinely place >250 orders in that window, revisit adding the same pagination pattern; low/mid-volume beta stores are unaffected. Covered by 5 new tests in `audit.server.test.ts` (throttle-then-succeed, exhausted-retries, non-throttled-error-not-retried, multi-page-follow, page-cap-stops-runaway-loop). |
 | **Prisma / SQLite persistence** | Data survives deploys and restarts. | Locally, `DATABASE_URL="file:dev.sqlite"`. **On Fly.io this must point at the mounted volume**, e.g. `DATABASE_URL="file:/data/prod.sqlite"` set as a `fly secrets set` value — the container filesystem outside `/data` is wiped on every deploy/restart. Confirm the volume is mounted (`fly volumes create leakaudit_data`) and `DATABASE_URL` is set to the volume path *before* the first production deploy, and that migrations are applied against that same path (`npx prisma migrate deploy` in a release step or on boot). |
 | **Billing toggle** | Beta stores are never charged; toggling billing on works cleanly. | `BILLING_ENABLED` (default off) and `BILLING_TEST_MODE` (default **on**, i.e. safe/non-charging) are read in `app/shopify.server.ts` / `app/routes/app.tsx`. Billing plan config (`LeakAudit Pro Plan`, $49/30 days, 14-day trial) is always present in the `shopifyApp()` config regardless of the flag — only whether `billing.require()` is actually *called* is gated. Verify: with `BILLING_ENABLED=false` the "Founder Beta: Free Lifetime Access" badge shows and no billing screen ever appears; with `BILLING_ENABLED=true` + `BILLING_TEST_MODE=true`, installing triggers a Shopify test (non-charging) approval screen. |
 | **Review banner dismissal** | Dismissal/snooze persists per shop, not per browser. | Stored server-side on `ShopSettings.reviewBannerDismissedAt` / `reviewBannerRemindAt` (Prisma/SQLite) — deliberately not `localStorage`, since embedded Admin can be opened from different browsers/devices for the same shop. Verify: dismiss or snooze the banner, reload from a different browser session, confirm it stays hidden (or reappears only after the 7-day snooze window). |
@@ -99,7 +99,7 @@ Below is the exact math and data source for each.
 
 ### 3.1 Automated coverage
 
-`app/services/audit.server.test.ts` has **36 vitest tests** covering `computeHealthScore`, `round2`, `daysAgoIso`, `insufficientData`, `errorLeak`, all 4 audit functions (including exact-threshold boundary cases: FX right at the $1/mo line, return rate right at the 8% benchmark, 5-signature bloat stacking, 8-offender/10-refund truncation to top-5), `numericId`, and full `runAudit()` end-to-end paths. Run with:
+`app/services/audit.server.test.ts` has **41 vitest tests** covering `computeHealthScore`, `round2`, `daysAgoIso`, `insufficientData`, `errorLeak`, all 4 audit functions (including exact-threshold boundary cases: FX right at the $1/mo line, return rate right at the 8% benchmark, 5-signature bloat stacking, 8-offender/10-refund truncation to top-5), `numericId`, full `runAudit()` end-to-end paths, and the GraphQL throttle-retry + `VARIANTS_QUERY` pagination behavior added Sep 8. Run with:
 
 ```
 npm test
@@ -130,7 +130,7 @@ This should pass with 0 failures before every deploy.
 ### Phase 2 — Commercial Launch
 - Flip `BILLING_ENABLED=true`, `BILLING_TEST_MODE=false`.
 - Plan already configured in `app/shopify.server.ts`: **"LeakAudit Pro Plan," $49/month, 14-day free trial**, billed via Shopify Managed Pricing (`billing.require()` in the shared `app.tsx` loader — gates every route under `/app`).
-- Before flipping this on: fix the GraphQL rate-limit/pagination gap (Section 2) so paying merchants on higher-volume stores get accurate numbers, not silently-truncated ones.
+- The GraphQL rate-limit/pagination gap (Section 2) is now fixed for the negative-margin check; if paid-tier stores turn out to place >250 orders in the FX/return-drift lookback windows, extend the same pagination pattern to `FX_QUERY`/`REFUNDS_QUERY` before relying on those numbers at scale.
 - Consider verifying a custom Resend sending domain at this stage so transactional/feedback emails stop landing in spam.
 
 ### Phase 3 — Future Roadmap (post-launch, not required for v1)
@@ -138,8 +138,8 @@ This should pass with 0 failures before every deploy.
 - **Real sales-velocity weighting** for the Negative-Margin check, replacing the flat ×3 placeholder multiplier with actual units-sold data from `orders`/`lineItems`.
 - **Theme App Extension / app-block detection** for the Bloat check, to catch modern Shopify 2.0 orphaned blocks that the current `theme.liquid`-regex approach can't see.
 - **Weekly automated alerts** (email today; WhatsApp/Slack as a stickiness feature) surfacing new leaks or health-score drops between manual visits — natural extension of the existing scan History/timeline data already captured in `AuditSnapshot`.
-- **GraphQL throttle handling + pagination past 250 records**, promoted from "known gap" to "fixed" once real paid-tier volume justifies the engineering time.
+- ~~GraphQL throttle handling + pagination past 250 records~~ — done Sep 8 for throttle retry (all 4 queries) and pagination (`VARIANTS_QUERY`). Remaining: apply the same pagination pattern to `FX_QUERY`/`REFUNDS_QUERY` if a paid-tier store ever places >250 orders inside a 30/60-day lookback window.
 
 ---
 
-*This document reflects the codebase as of 2026-09-07. Update it whenever the audit formulas, billing plan, or persistence strategy change.*
+*This document reflects the codebase as of 2026-09-08. Update it whenever the audit formulas, billing plan, or persistence strategy change.*

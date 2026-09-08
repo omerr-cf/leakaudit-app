@@ -97,6 +97,65 @@ export function computeHealthScore(leaks: LeakResult[]): number {
   return Math.max(0, Math.min(100, score));
 }
 
+// ---------------------------------------------------------------
+// GraphQL throttle-safe wrapper
+// ---------------------------------------------------------------
+// Shopify's Admin GraphQL API is cost-based: once a shop's bucket of
+// query "points" is drained (heavy admin usage, other apps running bulk
+// jobs, etc.) a request comes back as a 200 OK carrying a GraphQL-level
+// error whose extensions.code is "THROTTLED" instead of data. Left
+// unhandled, every audit that happens to hit this becomes a hard "error"
+// leak even though the right response is just "wait a beat and ask
+// again." This wraps a single admin.graphql call with a small number of
+// retries and exponential backoff so a momentarily-busy shop doesn't
+// produce a false "something's broken" result. Any other GraphQL-level
+// error (bad query, missing scope, etc.) is returned as-is on the first
+// attempt — retrying those would just fail the same way every time.
+const THROTTLE_MAX_RETRIES = 4;
+const THROTTLE_BASE_DELAY_MS = 1000; // backoff: 1s, 2s, 4s, 8s
+
+interface GraphqlErrorEntry {
+  message?: string;
+  extensions?: { code?: string };
+}
+interface GraphqlEnvelope {
+  errors?: GraphqlErrorEntry[];
+}
+
+function isThrottled(body: GraphqlEnvelope): boolean {
+  return (body.errors ?? []).some((e) => e.extensions?.code === "THROTTLED");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Runs a single admin.graphql call and returns the parsed JSON body,
+// automatically retrying with exponential backoff when Shopify reports
+// THROTTLED (extensions.code === "THROTTLED" on a GraphQL error entry).
+async function graphqlWithRetry<T>(
+  admin: AdminGraphQLClient,
+  query: string,
+  options?: { variables?: Record<string, unknown> },
+  maxRetries: number = THROTTLE_MAX_RETRIES,
+): Promise<T> {
+  let attempt = 0;
+  for (;;) {
+    const response = await admin.graphql(query, options);
+    const body = (await response.json()) as T & GraphqlEnvelope;
+    if (isThrottled(body) && attempt < maxRetries) {
+      const delay = THROTTLE_BASE_DELAY_MS * 2 ** attempt;
+      console.warn(
+        `[LeakAudit] GraphQL throttled — retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`,
+      );
+      await sleep(delay);
+      attempt += 1;
+      continue;
+    }
+    return body;
+  }
+}
+
 interface ShopCurrencyResponse {
   shop: { currencyCode: string };
 }
@@ -206,10 +265,9 @@ export async function auditPaymentFxLeak(
   shopCurrency: string,
 ): Promise<LeakResult> {
   const since = daysAgoIso(30);
-  const response = await admin.graphql(FX_QUERY, {
+  const data = await graphqlWithRetry<{ data: FxOrdersResponse }>(admin, FX_QUERY, {
     variables: { first: 250, query: `created_at:>=${since}` },
   });
-  const data = (await response.json()) as { data: FxOrdersResponse };
   const orders = data.data?.orders?.edges ?? [];
 
   if (orders.length === 0) {
@@ -310,8 +368,7 @@ const KNOWN_ORPHAN_SIGNATURES: { pattern: RegExp; label: string }[] = [
 ];
 
 export async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult> {
-  const response = await admin.graphql(THEME_QUERY);
-  const data = (await response.json()) as { data: ThemesResponse };
+  const data = await graphqlWithRetry<{ data: ThemesResponse }>(admin, THEME_QUERY);
   const theme = data.data?.themes?.nodes?.[0];
   const body = theme?.files?.nodes?.[0]?.body?.content;
 
@@ -355,12 +412,15 @@ interface VariantNode {
   inventoryItem?: { unitCost?: { amount?: string } };
 }
 interface VariantsResponse {
-  productVariants: { edges: { node: VariantNode }[] };
+  productVariants: {
+    edges: { node: VariantNode }[];
+    pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+  };
 }
 
 const VARIANTS_QUERY = `#graphql
-  query MarginVariants($first: Int!) {
-    productVariants(first: $first, query: "inventory_quantity:>0") {
+  query MarginVariants($first: Int!, $after: String) {
+    productVariants(first: $first, after: $after, query: "inventory_quantity:>0") {
       edges {
         node {
           id
@@ -372,9 +432,22 @@ const VARIANTS_QUERY = `#graphql
           }
         }
       }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
     }
   }
 `;
+
+// A store can easily have more than 250 in-stock variants; without paging
+// through the full set this check would silently only ever look at the
+// first page and under-report (or completely miss) negative-margin SKUs
+// on larger catalogs. 8 pages * 250 = up to 2,000 variants scanned per
+// audit run — a deliberate ceiling so one huge catalog can't turn a
+// single audit into an unbounded chain of GraphQL calls.
+const VARIANTS_PAGE_SIZE = 250;
+const VARIANTS_PAGE_CAP = 8;
 
 interface MarginOffender {
   title: string;
@@ -392,11 +465,21 @@ export async function auditNegativeMarginSkus(
   admin: AdminContext,
   settings: AuditSettings,
 ): Promise<LeakResult> {
-  const response = await admin.graphql(VARIANTS_QUERY, {
-    variables: { first: 250 },
-  });
-  const data = (await response.json()) as { data: VariantsResponse };
-  const variants = data.data?.productVariants?.edges ?? [];
+  const variants: { node: VariantNode }[] = [];
+  let after: string | null = null;
+  let pagesFetched = 0;
+
+  do {
+    const data: { data: VariantsResponse } = await graphqlWithRetry(
+      admin,
+      VARIANTS_QUERY,
+      { variables: { first: VARIANTS_PAGE_SIZE, after } },
+    );
+    const page: VariantsResponse["productVariants"] | undefined = data.data?.productVariants;
+    variants.push(...(page?.edges ?? []));
+    pagesFetched += 1;
+    after = page?.pageInfo?.hasNextPage ? (page.pageInfo.endCursor ?? null) : null;
+  } while (after && pagesFetched < VARIANTS_PAGE_CAP);
 
   if (variants.length === 0) {
     return insufficientData(
@@ -497,10 +580,9 @@ const REFUNDS_QUERY = `#graphql
 
 export async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
   const since = daysAgoIso(LOOKBACK_DAYS);
-  const response = await admin.graphql(REFUNDS_QUERY, {
+  const data = await graphqlWithRetry<{ data: ReturnOrdersResponse }>(admin, REFUNDS_QUERY, {
     variables: { first: 250, query: `created_at:>=${since}` },
   });
-  const data = (await response.json()) as { data: ReturnOrdersResponse };
   const orders = data.data?.orders?.edges ?? [];
 
   if (orders.length < 5) {
