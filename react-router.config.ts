@@ -20,6 +20,23 @@ export default {
   // origin is admin.shopify.com / the shop's own myshopify.com admin, so
   // both stay listed for that environment.
   //
+  // "leakaudit-app.fly.dev" is listed for a DIFFERENT reason: Fly.io
+  // terminates TLS at its own edge and forwards every request to the app
+  // as plain HTTP internally. `@react-router/serve` never calls Express's
+  // `app.set("trust proxy", ...)`, so `req.protocol` always reports "http"
+  // regardless of what the browser actually used — meaning every
+  // server-built `request.url` here is `http://leakaudit-app.fly.dev/...`
+  // even though the real request was https. That makes this check see a
+  // same-site request (the standalone, non-embedded `/auth/login` page,
+  // submitted to itself) as if it were cross-origin, purely over a
+  // scheme mismatch (http vs https), and reject it — confirmed via Fly
+  // logs: "The `request.url` origin does not match `origin` header from a
+  // forwarded action request." on POST /auth/login. Listing the app's own
+  // production host here is the fix react-router itself provides for
+  // exactly this "deployed behind a TLS-terminating proxy" situation,
+  // without needing a custom Express server just to flip trust-proxy on.
+  // Update this if the app ever moves to a custom domain.
+  //
   // IMPORTANT: this option lives on the React Router app config
   // (react-router.config.ts), NOT on the reactRouter() Vite plugin in
   // vite.config.ts — passing it there is silently ignored (confirmed by
@@ -29,5 +46,6 @@ export default {
     "admin.shopify.com",
     "*.myshopify.com",
     "*.trycloudflare.com",
+    "leakaudit-app.fly.dev",
   ],
 } satisfies Config;
