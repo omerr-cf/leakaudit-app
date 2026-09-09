@@ -36,4 +36,4 @@ api_version = "2026-10"
 scopes = "read_orders,read_products,read_shopify_payments_payouts,read_themes"
 
 [auth]
-redirect_urls = [ "https://leakaudit-app.fly.dev/api/auth" ]
+redirect_urls = [ "https://leakaudit-app.fly.dev/auth/callback" ]
