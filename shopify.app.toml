@@ -5,10 +5,8 @@ name = "leakaudit-app"
 application_url = "https://leakaudit-app.fly.dev"
 embedded = true
 
-[access_scopes]
-# Strictly read-only — LeakAudit never writes to the store.
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_orders,read_products,read_themes,read_shopify_payments_payouts"
+[build]
+automatically_update_urls_on_dev = true
 
 [webhooks]
 api_version = "2026-10"
@@ -18,19 +16,24 @@ api_version = "2026-10"
   topics = [ "app/uninstalled" ]
 
   [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/data_request"
+  compliance_topics = [ "customers/data_request" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/redact"
+  compliance_topics = [ "customers/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/redact"
+  compliance_topics = [ "shop/redact" ]
+
+  [[webhooks.subscriptions]]
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
-  # Mandatory GDPR/CCPA compliance "webhooks" are NOT regular topic
-  # subscriptions (that's why the CLI rejected them there) — they're a
-  # separate, dedicated config block. Same 3 route files still handle them.
-  [webhooks.privacy_compliance]
-  customer_data_request_url = "/webhooks/customers/data_request"
-  customer_deletion_url = "/webhooks/customers/redact"
-  shop_deletion_url = "/webhooks/shop/redact"
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_orders,read_products,read_shopify_payments_payouts,read_themes"
 
 [auth]
-redirect_urls = [ "https://leakaudit-app.fly.dev/auth/callback" ]
-
-[build]
-automatically_update_urls_on_dev = true
+redirect_urls = [ "https://leakaudit-app.fly.dev/api/auth" ]
