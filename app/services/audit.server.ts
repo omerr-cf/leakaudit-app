@@ -67,6 +67,12 @@ export const DEFAULT_AUDIT_SETTINGS: AuditSettings = {
 const FX_MARKUP_ESTIMATE = 0.018; // 1.8% assumed drag on cross-border presentment-currency orders (dimensionless, currency-agnostic)
 const RETURN_RATE_BENCHMARK = 0.08; // 8% treated as "normal" for general e-commerce
 const LOOKBACK_DAYS = 60;
+// Itemized drill-down lists (offending variants / FX orders / refunded
+// orders) shown in the "View Details" modal on the Home dashboard. This
+// is now the ONLY place a merchant sees the itemized list (no more
+// always-visible inline duplicate on the card), so it's sized for a
+// modal table rather than a small card teaser.
+const MODAL_DETAIL_CAP = 25;
 
 // Shopify's native bulk editor, filtered to just price + cost-per-item so
 // a merchant can fix every underpriced/uncosted variant on one
@@ -235,9 +241,13 @@ export function errorLeak(
 // ---------------------------------------------------------------
 interface FxOrderNode {
   id: string;
+  name: string;
   createdAt: string;
   presentmentCurrencyCode: string;
-  currentTotalPriceSet: { shopMoney: { amount: string; currencyCode: string } };
+  currentTotalPriceSet: {
+    shopMoney: { amount: string; currencyCode: string };
+    presentmentMoney: { amount: string; currencyCode: string };
+  };
 }
 interface FxOrdersResponse {
   orders: { edges: { node: FxOrderNode }[] };
@@ -249,10 +259,12 @@ const FX_QUERY = `#graphql
       edges {
         node {
           id
+          name
           createdAt
           presentmentCurrencyCode
           currentTotalPriceSet {
             shopMoney { amount currencyCode }
+            presentmentMoney { amount currencyCode }
           }
         }
       }
@@ -260,14 +272,28 @@ const FX_QUERY = `#graphql
   }
 `;
 
+interface FxOffendingOrder {
+  id: string;
+  name: string;
+  createdAt: string;
+  foreignAmount: number;
+  foreignCurrency: string;
+  estimatedDrag: number;
+  actionHref: string;
+}
+
 export async function auditPaymentFxLeak(
   admin: AdminContext,
   shopCurrency: string,
 ): Promise<LeakResult> {
   const since = daysAgoIso(30);
-  const data = await graphqlWithRetry<{ data: FxOrdersResponse }>(admin, FX_QUERY, {
-    variables: { first: 250, query: `created_at:>=${since}` },
-  });
+  const data = await graphqlWithRetry<{ data: FxOrdersResponse }>(
+    admin,
+    FX_QUERY,
+    {
+      variables: { first: 250, query: `created_at:>=${since}` },
+    },
+  );
   const orders = data.data?.orders?.edges ?? [];
 
   if (orders.length === 0) {
@@ -281,6 +307,10 @@ export async function auditPaymentFxLeak(
 
   let crossBorderRevenue = 0;
   let totalRevenue = 0;
+  // The specific cross-border orders driving the leak, so the dashboard's
+  // "View Details" modal can list them by name/date/amount with a direct
+  // link — not just the aggregate total.
+  const fxOffendingOrders: FxOffendingOrder[] = [];
 
   for (const { node } of orders) {
     const amount = parseFloat(
@@ -292,6 +322,21 @@ export async function auditPaymentFxLeak(
       node.presentmentCurrencyCode !== shopCurrency
     ) {
       crossBorderRevenue += amount;
+      const orderId = numericId(node.id);
+      if (orderId && fxOffendingOrders.length < MODAL_DETAIL_CAP) {
+        const foreignAmount = parseFloat(
+          node.currentTotalPriceSet?.presentmentMoney?.amount ?? String(amount),
+        );
+        fxOffendingOrders.push({
+          id: orderId,
+          name: node.name || `#${orderId}`,
+          createdAt: node.createdAt,
+          foreignAmount: round2(foreignAmount),
+          foreignCurrency: node.presentmentCurrencyCode,
+          estimatedDrag: round2(amount * FX_MARKUP_ESTIMATE),
+          actionHref: `/orders/${orderId}`,
+        });
+      }
     }
   }
 
@@ -314,6 +359,8 @@ export async function auditPaymentFxLeak(
       crossBorderRevenue: round2(crossBorderRevenue),
       totalRevenue: round2(totalRevenue),
       shopCurrency,
+      ordersScanned: orders.length,
+      fxOffendingOrders,
     },
   };
 }
@@ -336,7 +383,7 @@ interface ThemesResponse {
 
 const THEME_QUERY = `#graphql
   query ActiveThemeAsset {
-    themes(first: 5, roles: [MAIN]) {
+    themes(first: 5, roles: [[MAIN]]) {
       nodes {
         id
         name
@@ -354,6 +401,15 @@ const THEME_QUERY = `#graphql
     }
   }
 `;
+// IMPORTANT: the "themes" root query's `roles` argument is typed
+// [[ThemeRole!]] (a doubly-nested list) in Shopify's Admin API schema —
+// NOT [ThemeRole!]. Passing `roles: [MAIN]` (singly-nested) is a GraphQL
+// argument-type mismatch that Shopify rejects with a query error, which
+// is exactly why this check was failing with "Couldn't read theme.liquid"
+// on the live store: the whole `themes` query errored out, so
+// `data.themes` came back undefined — never a real "no theme" case at
+// all. Verified against https://shopify.dev/docs/api/admin-graphql/latest/queries/themes
+// (roles: [[ThemeRole!]]) for the 2026-07 API version this app targets.
 
 // Signatures of scripts/snippets commonly left behind by apps merchants
 // have since UNINSTALLED. Extend this list as you learn your ICP's stack.
@@ -368,7 +424,30 @@ const KNOWN_ORPHAN_SIGNATURES: { pattern: RegExp; label: string }[] = [
 ];
 
 export async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult> {
-  const data = await graphqlWithRetry<{ data: ThemesResponse }>(admin, THEME_QUERY);
+  const data = await graphqlWithRetry<
+    { data: ThemesResponse } & GraphqlEnvelope
+  >(admin, THEME_QUERY);
+
+  // A genuine GraphQL-level error (bad query, missing scope, transient API
+  // issue) is a DIFFERENT situation from "this store just doesn't have a
+  // published theme yet" — conflating the two used to mean every query
+  // error silently surfaced as the same generic "Couldn't read
+  // theme.liquid" message with zero diagnostic info. Surface it as an
+  // actual error instead, so it's visible (and debuggable) rather than
+  // indistinguishable from a legitimately empty store.
+  if (data.errors && data.errors.length > 0) {
+    return errorLeak(
+      "app_bloat",
+      "Leftover App Script Bloat",
+      new Error(
+        data.errors
+          .map((e) => e.message)
+          .filter(Boolean)
+          .join("; ") || "Unknown GraphQL error",
+      ),
+    );
+  }
+
   const theme = data.data?.themes?.nodes?.[0];
   const body = theme?.files?.nodes?.[0]?.body?.content;
 
@@ -397,7 +476,15 @@ export async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult
         : "No known orphaned app scripts detected in your live theme.",
     actionLabel: "Clean Leftover Scripts",
     actionHref: "/themes/current/editor",
-    details: { matches: found.map((f) => f.label), themeName: theme?.name },
+    details: {
+      matches: found.map((f) => f.label),
+      themeName: theme?.name,
+      // Only the main theme's layout/theme.liquid is scanned today — see
+      // the "Known limitation" note in RELEASE_CHECKLIST.md. Surfaced here
+      // so the Diagnostics panel can show exactly how much ground this
+      // check actually covers, not just its result.
+      themeFilesScanned: 1,
+    },
   };
 }
 
@@ -407,6 +494,7 @@ export async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult
 interface VariantNode {
   id: string;
   title: string;
+  sku: string | null;
   price: string;
   product?: { id?: string; title?: string };
   inventoryItem?: { unitCost?: { amount?: string } };
@@ -425,6 +513,7 @@ const VARIANTS_QUERY = `#graphql
         node {
           id
           title
+          sku
           price
           product { id title }
           inventoryItem {
@@ -451,13 +540,21 @@ const VARIANTS_PAGE_CAP = 8;
 
 interface MarginOffender {
   title: string;
+  sku: string | null;
   price: number;
   cost: number;
+  // The flat shipping assumption used for THIS computation (settings.
+  // shippingCostPerOrder) — carried per-offender so the "View Details"
+  // modal can show the exact Price vs Cost vs Shipping breakdown without
+  // re-threading settings through the UI layer.
+  shippingCost: number;
   netMargin: number;
   marginPercent: number;
-  // Relative admin path to this exact product's edit page, so the
-  // dashboard can link straight to the offending SKU instead of just the
-  // generic Products list. Null if we couldn't extract a usable id.
+  productId: string | null;
+  variantId: string | null;
+  // Relative admin path straight to this exact VARIANT's edit page
+  // (/products/{id}/variants/{id}) — falls back to the product page if
+  // only the product id could be extracted, and null if neither could.
   actionHref: string | null;
 }
 
@@ -497,7 +594,7 @@ export async function auditNegativeMarginSkus(
     return insufficientData(
       "negative_margin",
       "Negative-Margin SKUs",
-      `Set cost-per-item on your top SKUs to unlock margin tracking (0 of ${variants.length} variants have a cost set).`,
+      `Needs setup: 0 of ${variants.length} variants have a cost set. Set cost-per-item on your top SKUs to unlock margin tracking.`,
       { label: "Set Cost Per Item", href: BULK_EDIT_VARIANT_COSTS_PATH },
     );
   }
@@ -509,13 +606,23 @@ export async function auditNegativeMarginSkus(
       const netMargin = price - cost - settings.shippingCostPerOrder;
       const marginPercent = price > 0 ? (netMargin / price) * 100 : 0;
       const productId = numericId(e.node.product?.id);
+      const variantId = numericId(e.node.id);
       return {
         title: `${e.node.product?.title ?? ""} — ${e.node.title}`,
+        sku: e.node.sku || null,
         price,
         cost,
+        shippingCost: settings.shippingCostPerOrder,
         netMargin,
         marginPercent,
-        actionHref: productId ? `/products/${productId}` : null,
+        productId,
+        variantId,
+        actionHref:
+          productId && variantId
+            ? `/products/${productId}/variants/${variantId}`
+            : productId
+              ? `/products/${productId}`
+              : null,
       };
     })
     .filter((v) => v.marginPercent < settings.targetMarginPercent)
@@ -528,6 +635,8 @@ export async function auditNegativeMarginSkus(
     0,
   );
 
+  const skusMissingCost = variants.length - withCost.length;
+
   return {
     id: "negative_margin",
     title: "Negative-Margin SKUs",
@@ -536,13 +645,26 @@ export async function auditNegativeMarginSkus(
     headline:
       offenders.length > 0
         ? `${offenders.length} SKU${offenders.length > 1 ? "s are" : " is"} selling below your ${settings.targetMarginPercent}% target margin after estimated shipping cost.`
-        : `All SKUs are meeting your ${settings.targetMarginPercent}% target margin after estimated shipping.`,
+        : skusMissingCost > 0
+          ? // Some variants ARE checked and healthy, but plenty weren't
+            // checked at all — saying "All SKUs are meeting target margin"
+            // here would be misleading (they were never actually looked
+            // at), so this case gets its own honest, partial-coverage copy
+            // instead of silently falling into the "fully healthy" line.
+            `The ${withCost.length} of ${variants.length} variants with cost data set are all meeting your ${settings.targetMarginPercent}% target margin — but ${skusMissingCost} variant${skusMissingCost > 1 ? "s" : ""} still ${skusMissingCost > 1 ? "don't" : "doesn't"} have a cost set, so ${skusMissingCost > 1 ? "they haven't" : "it hasn't"} been checked yet.`
+          : `All SKUs are meeting your ${settings.targetMarginPercent}% target margin after estimated shipping.`,
     actionLabel: "Set Cost Per Item",
     actionHref: BULK_EDIT_VARIANT_COSTS_PATH,
     details: {
       skusChecked: withCost.length,
-      skusMissingCost: variants.length - withCost.length,
-      worstOffenders: offenders.slice(0, 5),
+      skusMissingCost,
+      worstOffenders: offenders.slice(0, MODAL_DETAIL_CAP),
+      totalVariantsScanned: variants.length,
+      // worstOffenders above is capped (MODAL_DETAIL_CAP) for the "View
+      // Details" modal — this is the REAL total, so the Diagnostics
+      // panel's formula line doesn't quietly undercount stores with more
+      // offending SKUs than the cap.
+      offendersCount: offenders.length,
     },
   };
 }
@@ -555,6 +677,8 @@ interface RefundNode {
 }
 interface ReturnOrderNode {
   id: string;
+  name: string;
+  createdAt: string;
   currentTotalPriceSet: { shopMoney: { amount: string } };
   refunds?: RefundNode[];
 }
@@ -568,6 +692,8 @@ const REFUNDS_QUERY = `#graphql
       edges {
         node {
           id
+          name
+          createdAt
           currentTotalPriceSet { shopMoney { amount } }
           refunds {
             totalRefundedSet { shopMoney { amount } }
@@ -578,11 +704,17 @@ const REFUNDS_QUERY = `#graphql
   }
 `;
 
-export async function auditReturnRateDrift(admin: AdminContext): Promise<LeakResult> {
+export async function auditReturnRateDrift(
+  admin: AdminContext,
+): Promise<LeakResult> {
   const since = daysAgoIso(LOOKBACK_DAYS);
-  const data = await graphqlWithRetry<{ data: ReturnOrdersResponse }>(admin, REFUNDS_QUERY, {
-    variables: { first: 250, query: `created_at:>=${since}` },
-  });
+  const data = await graphqlWithRetry<{ data: ReturnOrdersResponse }>(
+    admin,
+    REFUNDS_QUERY,
+    {
+      variables: { first: 250, query: `created_at:>=${since}` },
+    },
+  );
   const orders = data.data?.orders?.edges ?? [];
 
   if (orders.length < 5) {
@@ -597,9 +729,16 @@ export async function auditReturnRateDrift(admin: AdminContext): Promise<LeakRes
   let totalRevenue = 0;
   let totalRefunded = 0;
   let refundedOrderCount = 0;
-  // A few specific refunded orders, so the dashboard can link straight to
-  // them instead of only the generic Orders list.
-  const refundedOrders: { id: string; actionHref: string }[] = [];
+  // The specific refunded orders, so the "View Details" modal can list
+  // them by name/date/amount with a direct link — not just the aggregate
+  // total.
+  const refundedOrders: {
+    id: string;
+    name: string;
+    createdAt: string;
+    refundedAmount: number;
+    actionHref: string;
+  }[] = [];
 
   for (const { node } of orders) {
     const orderTotal = parseFloat(
@@ -614,8 +753,14 @@ export async function auditReturnRateDrift(admin: AdminContext): Promise<LeakRes
     if (refundedForOrder > 0) {
       refundedOrderCount += 1;
       const orderId = numericId(node.id);
-      if (orderId && refundedOrders.length < 5) {
-        refundedOrders.push({ id: orderId, actionHref: `/orders/${orderId}` });
+      if (orderId && refundedOrders.length < MODAL_DETAIL_CAP) {
+        refundedOrders.push({
+          id: orderId,
+          name: node.name || `#${orderId}`,
+          createdAt: node.createdAt,
+          refundedAmount: round2(refundedForOrder),
+          actionHref: `/orders/${orderId}`,
+        });
       }
     }
     totalRefunded += refundedForOrder;
@@ -644,6 +789,210 @@ export async function auditReturnRateDrift(admin: AdminContext): Promise<LeakRes
       refundedOrders,
     },
   };
+}
+
+// ---------------------------------------------------------------
+// 5. QA Diagnostics & Formula Inspector (Settings page, dev/beta only)
+// ---------------------------------------------------------------
+// Turns an already-finished AuditReport into a plain-English "show your
+// work" table: the exact raw counts each check pulled from Shopify, the
+// literal formula applied, and the resulting status — using nothing but
+// numbers each auditXyz() function above already computed and stored on
+// LeakResult.details. This performs NO GraphQL calls and NO new
+// computation of its own; it's read-only formatting on top of a report
+// that's already final, specifically so a human can sanity-check the math
+// without reading source code. See app/routes/app.settings.tsx for where
+// this is rendered.
+export interface DiagnosticRow {
+  id: LeakResult["id"];
+  title: string;
+  status: LeakStatus;
+  rawInputs: { label: string; value: string }[];
+  formula: string;
+  computedOutput: string;
+}
+
+function computedOutputLabel(leak: LeakResult, money: (n: number) => string): string {
+  switch (leak.status) {
+    case "leaking":
+      return `Leaking — ${money(leak.monthlyImpact)}/mo`;
+    case "insufficient_data":
+      return "Needs Setup";
+    case "error":
+      return "Error";
+    case "ok":
+      return "Healthy";
+  }
+}
+
+export function buildDiagnostics(report: AuditReport): DiagnosticRow[] {
+  const { currencyCode } = report;
+  const money = (n: number) => `${round2(n).toFixed(2)} ${currencyCode}`;
+  const asNumber = (v: unknown): number => (typeof v === "number" ? v : 0);
+
+  return report.leaks.map((leak): DiagnosticRow => {
+    const d = leak.details ?? {};
+
+    if (leak.status === "error") {
+      return {
+        id: leak.id,
+        title: leak.title,
+        status: leak.status,
+        rawInputs: [],
+        formula: "This check failed to run — see the error banner on the dashboard for details.",
+        computedOutput: computedOutputLabel(leak, money),
+      };
+    }
+
+    switch (leak.id) {
+      case "fx_fees": {
+        const ordersScanned = asNumber(d.ordersScanned);
+        const crossBorderRevenue = asNumber(d.crossBorderRevenue);
+        const totalRevenue = asNumber(d.totalRevenue);
+        return {
+          id: leak.id,
+          title: leak.title,
+          status: leak.status,
+          rawInputs: [
+            { label: "Orders scanned (last 30 days)", value: String(ordersScanned) },
+            { label: "Foreign-currency GMV detected", value: money(crossBorderRevenue) },
+            { label: "Total GMV in window", value: money(totalRevenue) },
+          ],
+          formula:
+            ordersScanned === 0
+              ? "No orders in the 30-day window — nothing to compute yet."
+              : `${money(crossBorderRevenue)} foreign GMV × ${(FX_MARKUP_ESTIMATE * 100).toFixed(1)}% = ${money(leak.monthlyImpact)}/mo`,
+          computedOutput: computedOutputLabel(leak, money),
+        };
+      }
+      case "app_bloat": {
+        const themeFilesScanned = asNumber(d.themeFilesScanned);
+        const scriptsFound = Array.isArray(d.matches) ? d.matches.length : 0;
+        return {
+          id: leak.id,
+          title: leak.title,
+          status: leak.status,
+          rawInputs: [
+            { label: "Theme files scanned", value: String(themeFilesScanned) },
+            { label: "Leftover script signatures found", value: String(scriptsFound) },
+          ],
+          formula:
+            themeFilesScanned === 0
+              ? "Couldn't read theme.liquid — nothing to compute yet."
+              : scriptsFound > 0
+                ? `${scriptsFound} script(s) × ${money(45)} flat estimate = ${money(leak.monthlyImpact)}/mo`
+                : "0 leftover scripts detected — no monthly impact.",
+          computedOutput: computedOutputLabel(leak, money),
+        };
+      }
+      case "negative_margin": {
+        const totalVariantsScanned = asNumber(d.totalVariantsScanned);
+        const skusChecked = asNumber(d.skusChecked);
+        const skusMissingCost = asNumber(d.skusMissingCost);
+        const offendersCount = asNumber(d.offendersCount);
+        return {
+          id: leak.id,
+          title: leak.title,
+          status: leak.status,
+          rawInputs: [
+            { label: "Variants scanned (in-stock)", value: String(totalVariantsScanned) },
+            { label: "Variants with cost-per-item set", value: String(skusChecked) },
+            { label: "Variants missing a cost", value: String(skusMissingCost) },
+          ],
+          formula:
+            totalVariantsScanned === 0
+              ? "No in-stock variants found — nothing to compute yet."
+              : skusChecked === 0
+                ? "0 variants have a cost set — nothing to compute yet."
+                : offendersCount > 0
+                  ? `Σ max(0, price − cost − shipping) over ${offendersCount} offending SKU(s) × 3/mo velocity = ${money(leak.monthlyImpact)}/mo`
+                  : `All ${skusChecked} costed SKU(s) clear the margin target — no leak.`,
+          computedOutput: computedOutputLabel(leak, money),
+        };
+      }
+      case "return_drift": {
+        const ordersAnalyzed = asNumber(d.ordersAnalyzed);
+        const totalRefunded = asNumber(d.totalRefunded);
+        const returnRatePercent = asNumber(d.returnRate); // already ×100
+        const benchmarkPercent = RETURN_RATE_BENCHMARK * 100;
+        return {
+          id: leak.id,
+          title: leak.title,
+          status: leak.status,
+          rawInputs: [
+            { label: `Orders scanned (last ${LOOKBACK_DAYS} days)`, value: String(ordersAnalyzed) },
+            { label: "Total refunded in window", value: money(totalRefunded) },
+            { label: "Return rate", value: `${returnRatePercent.toFixed(1)}%` },
+          ],
+          formula:
+            ordersAnalyzed < 5
+              ? `Only ${ordersAnalyzed} order(s) in the last ${LOOKBACK_DAYS} days — need at least 5 for a reliable rate.`
+              : returnRatePercent > benchmarkPercent
+                ? `${money(totalRefunded)} refunded × (30 / ${LOOKBACK_DAYS} days) = ${money(leak.monthlyImpact)}/mo (rate ${returnRatePercent.toFixed(1)}% vs ${benchmarkPercent.toFixed(0)}% benchmark)`
+                : `Return rate ${returnRatePercent.toFixed(1)}% is within the ${benchmarkPercent.toFixed(0)}% benchmark — no drift.`,
+          computedOutput: computedOutputLabel(leak, money),
+        };
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------
+// Snapshot deduplication policy (History page "Savings Ledger")
+// ---------------------------------------------------------------
+// Recording an AuditSnapshot on every single page render/navigation
+// clutters History with dozens of identical "No change" rows. This is
+// pure decision logic — no DB access — so it's unit-testable the same
+// way as everything else in this file; the actual AuditSnapshot
+// read/write stays in app/routes/app._index.tsx, which already owns all
+// db.* calls (this file deliberately has zero Prisma/DB dependency so it
+// can keep being tested with a plain fake admin client, no database
+// needed at all — see the header comment at the top of this file).
+export const SNAPSHOT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+export interface PreviousSnapshotInfo {
+  healthScore: number;
+  totalMonthlyLeak: number;
+  scannedAt: Date;
+}
+
+export interface SnapshotDecisionOptions {
+  // True only for an explicit, user-initiated "Re-Scan Store" click —
+  // never for a passive page-load/navigation loader run.
+  isManualRescan?: boolean;
+  // Injectable so tests don't depend on the real wall clock.
+  now?: Date;
+}
+
+/**
+ * Decides whether THIS scan's result is worth writing as a new
+ * AuditSnapshot row. Record a new one when:
+ *   a) there's no previous snapshot yet (always record the first scan), or
+ *   b) the health score or total monthly leak actually changed, or
+ *   c) this was an explicit manual "Re-Scan Store" click, or
+ *   d) at least 24 hours have elapsed since the last recorded snapshot
+ *      (so a store with nothing changing for weeks still gets an
+ *      occasional heartbeat row instead of the ledger going silent).
+ * Passive page loads/navigation that land on an unchanged, recent result
+ * return false — that's the "dozens of identical rows" case this exists
+ * to prevent.
+ */
+export function shouldRecordSnapshot(
+  previous: PreviousSnapshotInfo | null,
+  report: Pick<AuditReport, "healthScore" | "totalMonthlyLeak">,
+  options: SnapshotDecisionOptions = {},
+): boolean {
+  if (!previous) return true;
+  if (options.isManualRescan) return true;
+
+  const changed =
+    previous.healthScore !== report.healthScore ||
+    previous.totalMonthlyLeak !== report.totalMonthlyLeak;
+  if (changed) return true;
+
+  const now = options.now ?? new Date();
+  const elapsedMs = now.getTime() - previous.scannedAt.getTime();
+  return elapsedMs >= SNAPSHOT_MIN_INTERVAL_MS;
 }
 
 // ---------------------------------------------------------------

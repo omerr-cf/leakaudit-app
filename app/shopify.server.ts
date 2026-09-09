@@ -26,6 +26,19 @@ export const BILLING_TEST_MODE = process.env.BILLING_TEST_MODE !== "false";
 
 export const LEAKAUDIT_PLAN = "LeakAudit Pro Plan";
 
+// QA Diagnostics & Formula Inspector (Settings page) — shows exactly what
+// each check pulled from Shopify and the literal formula it computed, for
+// pre-launch verification. Never shown to real merchants by accident: it's
+// on automatically outside production (local dev, Shopify CLI dev store)
+// and OFF in production unless explicitly flipped on with
+// SHOW_QA_DIAGNOSTICS=true in a Fly.io secret — for example, to sanity-check
+// live production math against your own dev/test store before a broader
+// beta invite goes out. Turn it back off (unset the secret, or set it to
+// anything other than "true") once you're done.
+export const SHOW_QA_DIAGNOSTICS =
+  process.env.NODE_ENV !== "production" ||
+  process.env.SHOW_QA_DIAGNOSTICS === "true";
+
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",

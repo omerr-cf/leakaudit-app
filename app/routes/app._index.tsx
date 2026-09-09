@@ -11,11 +11,13 @@ import { useFetcher, useLoaderData } from "react-router";
 import db from "../db.server";
 import {
   runAudit,
+  shouldRecordSnapshot,
   type AuditReport,
   type LeakResult,
 } from "../services/audit.server";
 import { sendFeedbackNotification } from "../services/email.server";
 import { authenticate, BILLING_ENABLED } from "../shopify.server";
+import { badgeLabel, formatMoney, healthTone, toneFor } from "../utils/format";
 
 // Configurable once the app has a real Shopify App Store listing — set
 // SHOPIFY_APP_STORE_SLUG in .env (or a Fly.io secret) and the review
@@ -42,20 +44,44 @@ export interface SavingsSummary {
   recoveredMonthlyEstimate: number;
 }
 
-// Records this scan in AuditSnapshot (so the dashboard can show a trend
-// instead of only "right now") and returns a simple savings summary.
+// Records this scan in AuditSnapshot (so the dashboard/History page can
+// show a trend instead of only "right now") — but ONLY when the result is
+// actually worth a new row; see shouldRecordSnapshot()'s doc comment in
+// audit.server.ts for the exact policy (changed / manual rescan / 24h
+// heartbeat). Always returns a fresh savings summary regardless of
+// whether a new row was written.
 async function recordSnapshotAndSummarize(
   shop: string,
   report: AuditReport,
+  options: { isManualRescan?: boolean } = {},
 ): Promise<SavingsSummary> {
-  await db.auditSnapshot.create({
-    data: {
-      shop,
-      healthScore: report.healthScore,
-      totalMonthlyLeak: report.totalMonthlyLeak,
-      currencyCode: report.currencyCode,
-    },
+  const latest = await db.auditSnapshot.findFirst({
+    where: { shop },
+    orderBy: { scannedAt: "desc" },
   });
+
+  if (
+    shouldRecordSnapshot(
+      latest
+        ? {
+            healthScore: latest.healthScore,
+            totalMonthlyLeak: latest.totalMonthlyLeak,
+            scannedAt: latest.scannedAt,
+          }
+        : null,
+      report,
+      options,
+    )
+  ) {
+    await db.auditSnapshot.create({
+      data: {
+        shop,
+        healthScore: report.healthScore,
+        totalMonthlyLeak: report.totalMonthlyLeak,
+        currencyCode: report.currencyCode,
+      },
+    });
+  }
 
   const [scanCount, firstSnapshot] = await Promise.all([
     db.auditSnapshot.count({ where: { shop } }),
@@ -151,49 +177,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { reviewBannerHandled: true };
   }
 
-  // default intent: re-run the scan, using whatever settings are saved now
+  // default intent: re-run the scan, using whatever settings are saved now,
+  // strictly against the real Shopify Admin GraphQL API. This is always an
+  // explicit, user-initiated click — never a passive loader run — so it
+  // always records a snapshot regardless of whether the numbers changed
+  // (see shouldRecordSnapshot() in audit.server.ts).
   const settings = await getSettings(session.shop);
   const report = await runAudit(admin, session.shop, {
     shippingCostPerOrder: settings.shippingCostPerOrder,
     targetMarginPercent: settings.targetMarginPercent,
   });
-  const savings = await recordSnapshotAndSummarize(session.shop, report);
+  const savings = await recordSnapshotAndSummarize(session.shop, report, {
+    isManualRescan: true,
+  });
   return { report, savings };
 };
 
-function toneFor(
-  status: LeakResult["status"],
-): "critical" | "success" | "warning" | "info" {
-  switch (status) {
-    case "leaking":
-      return "critical";
-    case "ok":
-      return "success";
-    case "insufficient_data":
-      return "warning";
-    default:
-      return "info";
-  }
-}
-
-function badgeLabel(status: LeakResult["status"]) {
-  switch (status) {
-    case "leaking":
-      return "Leaking";
-    case "ok":
-      return "Healthy";
-    case "insufficient_data":
-      return "Needs setup";
-    default:
-      return "Error";
-  }
-}
-
-function healthTone(score: number): "critical" | "warning" | "success" {
-  if (score >= 90) return "success";
-  if (score >= 70) return "warning";
-  return "critical";
-}
+// toneFor, badgeLabel, healthTone, and formatMoney below now live in
+// ../utils/format.ts — shared with the QA Diagnostics panel on the
+// Settings page so the two never drift out of sync with separate copies.
 
 // Lower number = shown first. Leaking (actually costing money) leads,
 // then error (broken, needs attention), then needs-setup, then healthy.
@@ -217,26 +219,6 @@ const LEAK_ACTION_TIPS: Record<LeakResult["id"], string> = {
     "💡 Fix: Check sizing charts, product photos/descriptions, and packaging for your most-returned items — most return spikes trace back to expectation mismatches, not defects.",
 };
 
-// Format in the SHOP's own currency (not hardcoded $) — see audit.server.ts
-// for why this matters for any non-USD merchant.
-// Small leaks (a few cents/agorot of margin drag) used to round away to
-// "$0", which read as broken. Amounts under 10 units keep 2 decimals;
-// anything bigger rounds to whole units so large totals stay clean.
-function formatMoney(amount: number, currencyCode: string): string {
-  const decimals = Math.abs(amount) > 0 && Math.abs(amount) < 10 ? 2 : 0;
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: currencyCode,
-      minimumFractionDigits: decimals,
-      maximumFractionDigits: decimals,
-    }).format(amount);
-  } catch {
-    // Unknown/invalid currency code — fail soft instead of crashing the page.
-    return `${amount.toFixed(decimals)} ${currencyCode}`;
-  }
-}
-
 // Turns a relative admin path (e.g. "/products/123") into the full
 // admin.shopify.com URL for this shop, so action buttons actually go
 // somewhere instead of doing nothing. `target="_top"` on the <s-button>
@@ -249,7 +231,14 @@ function adminUrl(shopDomain: string, relativePath: string): string {
 
 interface MarginOffenderView {
   title: string;
+  sku: string | null;
+  price: number;
+  cost: number;
+  shippingCost: number;
+  netMargin: number;
   marginPercent: number;
+  productId: string | null;
+  variantId: string | null;
   actionHref: string | null;
 }
 
@@ -269,6 +258,9 @@ function getWorstOffenders(
 
 interface RefundedOrderView {
   id: string;
+  name: string;
+  createdAt: string;
+  refundedAmount: number;
   actionHref: string;
 }
 
@@ -303,6 +295,30 @@ function getFxDetails(
     return details as unknown as FxDetailsView;
   }
   return null;
+}
+
+interface FxOffendingOrderView {
+  id: string;
+  name: string;
+  createdAt: string;
+  foreignAmount: number;
+  foreignCurrency: string;
+  estimatedDrag: number;
+  actionHref: string;
+}
+
+function getFxOffendingOrders(
+  details: Record<string, unknown> | undefined,
+): FxOffendingOrderView[] {
+  const raw = details?.fxOffendingOrders;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (o): o is FxOffendingOrderView =>
+      typeof o === "object" &&
+      o !== null &&
+      typeof (o as FxOffendingOrderView).id === "string" &&
+      typeof (o as FxOffendingOrderView).actionHref === "string",
+  );
 }
 
 interface BloatDetailsView {
@@ -531,6 +547,8 @@ export default function Index() {
         const modalId = `detail-modal-${leak.id}`;
         const fxDetails =
           leak.id === "fx_fees" ? getFxDetails(leak.details) : null;
+        const fxOffendingOrders =
+          leak.id === "fx_fees" ? getFxOffendingOrders(leak.details) : [];
         const bloatDetails =
           leak.id === "app_bloat" ? getBloatDetails(leak.details) : null;
         const offenders =
@@ -584,48 +602,21 @@ export default function Index() {
               {leak.id === "negative_margin" &&
                 leak.status === "leaking" &&
                 offenders.length > 0 && (
-                  <s-stack direction="block" gap="small">
-                    {offenders.map((offender, i) => (
-                      <s-stack key={i} direction="inline" gap="small">
-                        <s-text>
-                          {offender.title} ({offender.marginPercent.toFixed(0)}%
-                          margin)
-                        </s-text>
-                        {offender.actionHref && (
-                          <s-button
-                            href={adminUrl(
-                              liveReport.shopDomain,
-                              offender.actionHref,
-                            )}
-                            target="_top"
-                          >
-                            Open
-                          </s-button>
-                        )}
-                      </s-stack>
-                    ))}
-                  </s-stack>
+                  <s-paragraph color="subdued">
+                    {offenders.length} SKU{offenders.length === 1 ? "" : "s"}{" "}
+                    priced below your target margin — open View Details for
+                    the itemized list and direct links to each variant.
+                  </s-paragraph>
                 )}
 
               {leak.id === "return_drift" &&
                 leak.status === "leaking" &&
                 refundedOrders.length > 0 && (
-                  <s-stack direction="block" gap="small">
-                    {refundedOrders.map((order) => (
-                      <s-stack key={order.id} direction="inline" gap="small">
-                        <s-text>Order #{order.id}</s-text>
-                        <s-button
-                          href={adminUrl(
-                            liveReport.shopDomain,
-                            order.actionHref,
-                          )}
-                          target="_top"
-                        >
-                          Open
-                        </s-button>
-                      </s-stack>
-                    ))}
-                  </s-stack>
+                  <s-paragraph color="subdued">
+                    {refundedOrders.length} refunded order
+                    {refundedOrders.length === 1 ? "" : "s"} in the lookback
+                    window — open View Details for the itemized list.
+                  </s-paragraph>
                 )}
 
               <s-stack direction="inline" gap="base">
@@ -669,12 +660,12 @@ export default function Index() {
                           fxDetails.shopCurrency,
                         )}{" "}
                         total revenue ({crossBorderPercent}%) came from orders
-                        placed in a currency other than your store&apos;s default (
-                        {fxDetails.shopCurrency}).
+                        placed in a currency other than your store&apos;s
+                        default ({fxDetails.shopCurrency}).
                       </s-paragraph>
                       <s-paragraph color="subdued">
-                        At an estimated 1.8% conversion &amp; FX drag, that&apos;s
-                        the{" "}
+                        At an estimated 1.8% conversion &amp; FX drag,
+                        that&apos;s the{" "}
                         {formatMoney(
                           leak.monthlyImpact,
                           liveReport.currencyCode,
@@ -682,6 +673,54 @@ export default function Index() {
                         /mo shown above. Adding local currency pricing for your
                         top markets is the usual fix.
                       </s-paragraph>
+                      {fxOffendingOrders.length > 0 && (
+                        <s-table>
+                          <s-table-header-row>
+                            <s-table-header>Order</s-table-header>
+                            <s-table-header>Date</s-table-header>
+                            <s-table-header>
+                              Foreign Currency Total
+                            </s-table-header>
+                            <s-table-header>Est. FX Drag</s-table-header>
+                            <s-table-header></s-table-header>
+                          </s-table-header-row>
+                          <s-table-body>
+                            {fxOffendingOrders.map((order) => (
+                              <s-table-row key={order.id}>
+                                <s-table-cell>{order.name}</s-table-cell>
+                                <s-table-cell>
+                                  {new Date(
+                                    order.createdAt,
+                                  ).toLocaleDateString()}
+                                </s-table-cell>
+                                <s-table-cell>
+                                  {formatMoney(
+                                    order.foreignAmount,
+                                    order.foreignCurrency,
+                                  )}
+                                </s-table-cell>
+                                <s-table-cell>
+                                  {formatMoney(
+                                    order.estimatedDrag,
+                                    liveReport.currencyCode,
+                                  )}
+                                </s-table-cell>
+                                <s-table-cell>
+                                  <s-button
+                                    href={adminUrl(
+                                      liveReport.shopDomain,
+                                      order.actionHref,
+                                    )}
+                                    target="_top"
+                                  >
+                                    View Order ↗
+                                  </s-button>
+                                </s-table-cell>
+                              </s-table-row>
+                            ))}
+                          </s-table-body>
+                        </s-table>
+                      )}
                     </>
                   )}
 
@@ -703,8 +742,9 @@ export default function Index() {
                       </s-stack>
                       <s-paragraph color="subdued">
                         These are usually left behind by an app you uninstalled.
-                        Removing the snippet from your theme code won&apos;t break
-                        anything — the app it was talking to is already gone.
+                        Removing the snippet from your theme code won&apos;t
+                        break anything — the app it was talking to is already
+                        gone.
                       </s-paragraph>
                     </>
                   )}
@@ -715,27 +755,71 @@ export default function Index() {
                         These products are priced below your target margin once
                         cost and shipping are factored in:
                       </s-paragraph>
-                      <s-stack direction="block" gap="small">
-                        {offenders.map((offender, i) => (
-                          <s-stack key={i} direction="inline" gap="small">
-                            <s-text>
-                              {offender.title} (
-                              {offender.marginPercent.toFixed(0)}% margin)
-                            </s-text>
-                            {offender.actionHref && (
-                              <s-button
-                                href={adminUrl(
-                                  liveReport.shopDomain,
-                                  offender.actionHref,
+                      <s-table>
+                        <s-table-header-row>
+                          <s-table-header>Product / Variant</s-table-header>
+                          <s-table-header>SKU</s-table-header>
+                          <s-table-header>Retail Price</s-table-header>
+                          <s-table-header>Unit Cost</s-table-header>
+                          <s-table-header>Est. Shipping</s-table-header>
+                          <s-table-header>Net Margin</s-table-header>
+                          <s-table-header></s-table-header>
+                        </s-table-header-row>
+                        <s-table-body>
+                          {offenders.map((offender, i) => (
+                            <s-table-row key={offender.variantId ?? i}>
+                              <s-table-cell>{offender.title}</s-table-cell>
+                              <s-table-cell>{offender.sku ?? "—"}</s-table-cell>
+                              <s-table-cell>
+                                {formatMoney(
+                                  offender.price,
+                                  liveReport.currencyCode,
                                 )}
-                                target="_top"
-                              >
-                                Open
-                              </s-button>
-                            )}
-                          </s-stack>
-                        ))}
-                      </s-stack>
+                              </s-table-cell>
+                              <s-table-cell>
+                                {formatMoney(
+                                  offender.cost,
+                                  liveReport.currencyCode,
+                                )}
+                              </s-table-cell>
+                              <s-table-cell>
+                                {formatMoney(
+                                  offender.shippingCost,
+                                  liveReport.currencyCode,
+                                )}
+                              </s-table-cell>
+                              <s-table-cell>
+                                <s-text
+                                  tone={
+                                    offender.netMargin < 0
+                                      ? "critical"
+                                      : undefined
+                                  }
+                                >
+                                  {formatMoney(
+                                    offender.netMargin,
+                                    liveReport.currencyCode,
+                                  )}{" "}
+                                  ({offender.marginPercent.toFixed(0)}%)
+                                </s-text>
+                              </s-table-cell>
+                              <s-table-cell>
+                                {offender.actionHref && (
+                                  <s-button
+                                    href={adminUrl(
+                                      liveReport.shopDomain,
+                                      offender.actionHref,
+                                    )}
+                                    target="_top"
+                                  >
+                                    Edit Variant in Shopify ↗
+                                  </s-button>
+                                )}
+                              </s-table-cell>
+                            </s-table-row>
+                          ))}
+                        </s-table-body>
+                      </s-table>
                     </>
                   )}
 
@@ -745,26 +829,45 @@ export default function Index() {
                         These recent orders were refunded and are dragging your
                         return rate above benchmark:
                       </s-paragraph>
-                      <s-stack direction="block" gap="small">
-                        {refundedOrders.map((order) => (
-                          <s-stack
-                            key={order.id}
-                            direction="inline"
-                            gap="small"
-                          >
-                            <s-text>Order #{order.id}</s-text>
-                            <s-button
-                              href={adminUrl(
-                                liveReport.shopDomain,
-                                order.actionHref,
-                              )}
-                              target="_top"
-                            >
-                              Open
-                            </s-button>
-                          </s-stack>
-                        ))}
-                      </s-stack>
+                      <s-table>
+                        <s-table-header-row>
+                          <s-table-header>Order</s-table-header>
+                          <s-table-header>Date</s-table-header>
+                          <s-table-header>Refunded Amount</s-table-header>
+                          <s-table-header></s-table-header>
+                        </s-table-header-row>
+                        <s-table-body>
+                          {refundedOrders.map((order) => (
+                            <s-table-row key={order.id}>
+                              <s-table-cell>{order.name}</s-table-cell>
+                              <s-table-cell>
+                                {order.createdAt
+                                  ? new Date(
+                                      order.createdAt,
+                                    ).toLocaleDateString()
+                                  : "—"}
+                              </s-table-cell>
+                              <s-table-cell>
+                                {formatMoney(
+                                  order.refundedAmount,
+                                  liveReport.currencyCode,
+                                )}
+                              </s-table-cell>
+                              <s-table-cell>
+                                <s-button
+                                  href={adminUrl(
+                                    liveReport.shopDomain,
+                                    order.actionHref,
+                                  )}
+                                  target="_top"
+                                >
+                                  View Order ↗
+                                </s-button>
+                              </s-table-cell>
+                            </s-table-row>
+                          ))}
+                        </s-table-body>
+                      </s-table>
                     </>
                   )}
                 </s-stack>
@@ -808,8 +911,8 @@ export default function Index() {
             </s-paragraph>
           ) : (
             <s-paragraph>
-              We&apos;ll show your savings here once a scan shows a lower total leak
-              than your first one did.
+              We&apos;ll show your savings here once a scan shows a lower total
+              leak than your first one did.
             </s-paragraph>
           )}
           <s-paragraph color="subdued">

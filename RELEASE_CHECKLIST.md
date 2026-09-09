@@ -1,7 +1,7 @@
 # LeakAudit — Release Checklist
 
 **Status:** Pre-beta / pre-deployment
-**Last updated:** 2026-09-08
+**Last updated:** 2026-09-09
 **Scope:** This document is the single source of truth for what LeakAudit actually does today, what must be verified before real merchants touch it, how to test it, and the launch/monetization plan. It replaces informal notes with values pulled directly from the current codebase (`app/services/audit.server.ts`, `app/shopify.server.ts`, `app/routes/app*.tsx`).
 
 > A note on an earlier draft of this checklist: a version of this document was drafted externally (by another AI) before this one. Several of its claims didn't match the actual code — most importantly, it implied GraphQL rate-limiting is handled (it isn't) and used a slightly wrong framing for the FX check (it's an *estimate*, not a real fee lookup). This version corrects those points and is grounded in the real source.
@@ -44,7 +44,7 @@ Below is the exact math and data source for each.
   offender if marginPercent < targetMarginPercent              (default = 20%)
   monthlyImpact = Σ max(0, −netMargin) × 3     ← placeholder velocity multiplier, NOT real sales-per-SKU data
   ```
-  Worst 5 offenders (lowest `marginPercent`) are surfaced in the detail modal.
+  Worst 25 offenders (lowest `marginPercent`) are surfaced, one row per SKU/variant, in the "View Details" modal — each with its SKU, retail price, unit cost, estimated shipping, net margin $/%, and a direct `Edit Variant in Shopify ↗` link to `https://admin.shopify.com/store/{shop}/products/{productId}/variants/{variantId}`.
 - **Insufficient data:** 0 in-stock variants, or 0 variants have a cost set at all (`unitCost.amount` empty — this is common on stores that never filled in "Cost per item").
 - **Suggested action:** "Set Cost Per Item" → deep-links to the bulk variant editor: `/bulk?resource_name=ProductVariant&edit=price,inventory_item.cost`.
 - **Known limitation to disclose honestly:** the ×3 velocity multiplier is a flat placeholder, not units-sold. It should be called an *estimate* in any merchant-facing copy, not a precise number. Actual sales velocity per SKU (via `orders`/`lineItems`) is a good v1.1 improvement, not required for beta.
@@ -53,7 +53,7 @@ Below is the exact math and data source for each.
 
 **What it measures:** leftover third-party app script tags still injected into the theme after the merchant uninstalled the app — pure cost with zero benefit.
 
-- **Data source:** Shopify Admin GraphQL, `themes(first: 5, roles: [MAIN])`, then fetches `layout/theme.liquid` asset content for the main theme.
+- **Data source:** Shopify Admin GraphQL, `themes(first: 5, roles: [[MAIN]])`, then fetches `layout/theme.liquid` asset content for the main theme. **Fixed Sep 9:** the `roles` argument is typed `[[ThemeRole!]]` (doubly-nested) in Shopify's Admin API schema, not `[ThemeRole!]` — the previous singly-nested `roles: [MAIN]` was a GraphQL argument-type mismatch that Shopify rejected outright, so `data.themes` came back `undefined` on every real store and this check always fell through to "Couldn't read theme.liquid," even on stores with a completely normal published theme. `graphqlWithRetry()`'s response is now also checked for a genuine `errors` array and surfaced as an `error` status (with the underlying GraphQL message attached) instead of being silently misreported as `insufficient_data` — this applies to any future query failure here, not just this one bug.
 - **Formula:**
   ```
   found = theme.liquid content matched against 7 known "orphan" signatures
@@ -76,7 +76,7 @@ Below is the exact math and data source for each.
   status = "leaking" if drift > 0.01 (i.e. return rate > 9%), else "ok"
   monthlyImpact = totalRefundedAmount × (30 / 60)     when leaking, else $0
   ```
-  Up to 5 refunded orders are listed in the detail modal.
+  Up to 25 refunded orders are listed in the "View Details" modal, each with its order name, refund date, refunded amount, and a direct `View Order ↗` link to `https://admin.shopify.com/store/{shop}/orders/{orderId}`.
 - **Insufficient data:** fewer than 5 orders in the 60-day window.
 - **Suggested action:** "Investigate Return Drivers" → deep-links to `/orders`.
 
@@ -86,12 +86,38 @@ Below is the exact math and data source for each.
 
 | Area | What to verify | Current status |
 |---|---|---|
-| **OAuth flow** | App installs cleanly on a fresh dev store; session token issued and refreshed without manual code. | ✅ Verified live on Fly.io (Sep 7): `GET /auth?shop=...` returns a clean 200 and correctly redirects into the embedded Shopify Admin frame (`admin.shopify.com/store/leakaudit-test-store/apps/leakaudit-app`). ⚠️ Found and fixed one real bug during this check: the standalone `/auth/login` page (manual "type your shop domain" form) threw `Error: Bad Request` on submit — React Router's single-fetch data protocol can't carry the cross-origin redirect that `shopify.login()` throws. Fixed by adding `reloadDocument` to the `<Form>` in `app/routes/auth.login/route.tsx` (forces a real full-page POST instead of a client-side fetch) — **this fix is committed to disk but not yet deployed; run `fly deploy` to ship it.** ❓ Still needs a real-browser check: the embedded dashboard content area appeared blank when loaded through an automated browser session — unclear yet if that is a genuine bug or a browser-automation artifact. Open the app from the dev store in your own normal Chrome window and confirm the dashboard actually renders before checking this row off. |
+| **OAuth flow** | App installs cleanly on a fresh dev store; session token issued and refreshed without manual code. | ✅ Verified live on Fly.io (Sep 7): `GET /auth?shop=...` returns a clean 200 and correctly redirects into the embedded Shopify Admin frame (`admin.shopify.com/store/leakaudit-test-store/apps/leakaudit-app`). ⚠️ Found and fixed one real bug during this check: the standalone `/auth/login` page (manual "type your shop domain" form) threw `Error: Bad Request` on submit — React Router's single-fetch data protocol can't carry the cross-origin redirect that `shopify.login()` throws. Fixed by adding `reloadDocument` to the `<Form>` in `app/routes/auth.login/route.tsx` (forces a real full-page POST instead of a client-side fetch) — **this fix is committed to disk but not yet deployed; run `fly deploy` to ship it.** ❓ Still needs a real-browser check: the embedded dashboard content area appeared blank when loaded through an automated browser session — unclear yet if that is a genuine bug or a browser-automation artifact. Open the app from the dev store in your own normal Chrome window and confirm the dashboard actually renders before checking this row off. ✅ **Resolved (Sep 8):** a second, separate `/auth/login` failure — `Error: origin does not match` / CSRF check tripping on every submit once deployed to Fly.io — was root-caused to Fly.io terminating TLS at its edge and forwarding plain HTTP internally; `@react-router/serve` never enables Express's `trust proxy`, so `req.protocol` always reported `"http"` even for real HTTPS requests, making React Router's own same-origin check see a scheme mismatch. Fixed via React Router's supported `allowedActionOrigins` config (`react-router.config.ts`), adding `"leakaudit-app.fly.dev"` to the allowlist — no custom Express server needed. Verified via a full production build and confirming the compiled `build/server/index.js` contains the updated allowlist. |
 | **GraphQL rate limits** | Confirm the app degrades gracefully if Shopify throttles a request. | ✅ **Fixed (Sep 8).** All 4 audit queries (`FX_QUERY`, `THEME_QUERY`, `VARIANTS_QUERY`, `REFUNDS_QUERY`) now go through a shared `graphqlWithRetry()` wrapper in `audit.server.ts`: any GraphQL error with `extensions.code === "THROTTLED"` is retried with exponential backoff (1s, 2s, 4s, 8s — 4 retries max) instead of failing the check outright. Separately, `VARIANTS_QUERY` (the negative-margin check) now follows Shopify’s `pageInfo.hasNextPage`/`endCursor` cursor across up to 8 pages (2,000 in-stock variants) instead of silently stopping at the first 250. `FX_QUERY` and `REFUNDS_QUERY` still only look at the first 250 orders in their respective lookback windows (30/60 days) — for stores that genuinely place >250 orders in that window, revisit adding the same pagination pattern; low/mid-volume beta stores are unaffected. Covered by 5 new tests in `audit.server.test.ts` (throttle-then-succeed, exhausted-retries, non-throttled-error-not-retried, multi-page-follow, page-cap-stops-runaway-loop). |
 | **Prisma / SQLite persistence** | Data survives deploys and restarts. | Locally, `DATABASE_URL="file:dev.sqlite"`. **On Fly.io this must point at the mounted volume**, e.g. `DATABASE_URL="file:/data/prod.sqlite"` set as a `fly secrets set` value — the container filesystem outside `/data` is wiped on every deploy/restart. Confirm the volume is mounted (`fly volumes create leakaudit_data`) and `DATABASE_URL` is set to the volume path *before* the first production deploy, and that migrations are applied against that same path (`npx prisma migrate deploy` in a release step or on boot). |
 | **Billing toggle** | Beta stores are never charged; toggling billing on works cleanly. | `BILLING_ENABLED` (default off) and `BILLING_TEST_MODE` (default **on**, i.e. safe/non-charging) are read in `app/shopify.server.ts` / `app/routes/app.tsx`. Billing plan config (`LeakAudit Pro Plan`, $49/30 days, 14-day trial) is always present in the `shopifyApp()` config regardless of the flag — only whether `billing.require()` is actually *called* is gated. Verify: with `BILLING_ENABLED=false` the "Founder Beta: Free Lifetime Access" badge shows and no billing screen ever appears; with `BILLING_ENABLED=true` + `BILLING_TEST_MODE=true`, installing triggers a Shopify test (non-charging) approval screen. |
 | **Review banner dismissal** | Dismissal/snooze persists per shop, not per browser. | Stored server-side on `ShopSettings.reviewBannerDismissedAt` / `reviewBannerRemindAt` (Prisma/SQLite) — deliberately not `localStorage`, since embedded Admin can be opened from different browsers/devices for the same shop. Verify: dismiss or snooze the banner, reload from a different browser session, confirm it stays hidden (or reappears only after the 7-day snooze window). |
 | **Secrets** | No API keys ever leak into logs, git, or generated docs. | `RESEND_API_KEY` confirmed present in `.env` and never printed/logged/committed. `.env` is gitignored. This checklist and all app code reference it only via `process.env.RESEND_API_KEY`. |
+| **QA Diagnostics & Calculation Inspector** | Visual confidence in the leak math before real merchants see it. | ✅ **Built (Sep 8), simulation removed (Sep 9).** Settings → "🛠️ Developer Diagnostics & Calculation Inspector" (gated by `SHOW_QA_DIAGNOSTICS`, on automatically outside production, off in production unless a `SHOW_QA_DIAGNOSTICS=true` Fly secret is explicitly set) shows, per check: the raw Shopify inputs the last scan pulled, the exact plain-English formula applied, and the resulting status — always from a real, live scan (see the row below). The raw "Feedback You've Sent" list on Settings is gated behind the same `SHOW_QA_DIAGNOSTICS` flag — real merchants only ever see the clean "Send Us Feedback" input card on Home. |
+| **Simulation & mock layer removed** | The app operates 100% against live store data — no synthetic/mock branching anywhere. | ✅ **Removed (Sep 9).** Deleted `app/services/qaSimulator.server.ts` and its test file entirely. Removed every simulation code path from `app/routes/app._index.tsx` and `app/routes/app.settings.tsx` — the "🧪 Simulate…" buttons, the "Simulated data — nothing written to your store" banner, `runAuditRespectingSimulation()`/`summarizeWithoutRecording()`, and all `isSimulated`/`scenarioLabel` state. Dropped `ShopSettings.activeSimulationScenario` from the schema via a new migration (`prisma/migrations/20260909100000_drop_simulation_scenario/`) — see Section 5. Every scan, Home dashboard and Settings Inspector alike, now runs strictly through `runAudit(admin, ...)` against the real Shopify Admin GraphQL API. |
+| **Itemized drill-down modals ("View Details")** | Merchants can see and act on the exact offending items behind each leak, not just a rollup number. | ✅ **Built (Sep 9).** Each leak card's "View Details" modal now renders a proper table of the underlying records instead of a capped teaser list duplicated in the card body: Negative-Margin shows up to 25 SKUs (title, SKU, retail price, unit cost, est. shipping, net margin $/%, `Edit Variant in Shopify ↗` deep link to `/products/{id}/variants/{id}`); Payment & FX Drag shows up to 25 offending orders (order name, date, foreign-currency total, estimated FX drag $, `View Order ↗` deep link to `/orders/{id}`); Return-Rate Drift shows up to 25 refunded orders (order name, refunded $, `View Order ↗` deep link). All three share a new `MODAL_DETAIL_CAP = 25` constant in `audit.server.ts` (up from the old teaser cap of 5, since the modal is now the sole itemized view, not a preview). |
+| **Live `theme.liquid` scanning fixed** | The Script/App Bloat check reads the store's actual published theme. | ✅ **Fixed (Sep 9).** Root-caused the "Couldn't read theme.liquid" error hit on a real live store: the `themes` root query's `roles` argument is typed `[[ThemeRole!]]` (doubly-nested) in Shopify's schema, not `[ThemeRole!]` — the old `roles: [MAIN]` was rejected by Shopify as a GraphQL argument-type mismatch, so the query silently returned no data on every real store, not just this one. Fixed to `roles: [[MAIN]]`. Also hardened `auditAppBloatLeak()` to check for a genuine GraphQL `errors` array and return an `error` status (with the real message attached) instead of always falling through to the generic "insufficient data" copy — any future query failure here is now diagnosable instead of silent. |
+
+---
+
+## 2a. Required Fly secrets before `fly deploy`
+
+Confirmed against every `process.env.*` reference in the codebase (`app/shopify.server.ts`, `app/services/email.server.ts`) — set each with `fly secrets set KEY=value`, never committed to git or this checklist:
+
+| Secret | Required? | Notes |
+|---|---|---|
+| `SHOPIFY_API_KEY` | **Required** | From the Partner Dashboard app config. |
+| `SHOPIFY_API_SECRET` | **Required** | From the Partner Dashboard app config. |
+| `SCOPES` | **Required** | Comma-separated. Must match `shopify.app.toml`'s `access_scopes` — read-only today, by design. |
+| `SHOPIFY_APP_URL` | **Required** | The app's public HTTPS URL (`https://leakaudit-app.fly.dev` or your custom domain). |
+| `DATABASE_URL` | **Required** | Must point at the mounted volume in production, e.g. `file:/data/prod.sqlite` — **not** the local `file:dev.sqlite` default. |
+| `RESEND_API_KEY` | **Required** | Powers weekly alert emails + feedback notifications. |
+| `RESEND_FROM_ADDRESS` | Optional | Defaults to `onboarding@resend.dev` (Resend's shared sending domain — commonly lands in spam until a custom domain is verified). |
+| `SUPPORT_NOTIFICATION_EMAIL` | Optional | Where in-app feedback notifications are sent; feedback is still saved to the DB either way if unset. |
+| `SHOP_CUSTOM_DOMAIN` | Optional | Only needed if testing against a custom shop domain. |
+| `BILLING_ENABLED` | Optional | Default `false` (off) — flip to `true` for Phase 2 commercial launch. |
+| `BILLING_TEST_MODE` | Optional | Default `true` (safe/non-charging) — set `false` only once ready to actually charge stores. |
+| `SHOW_QA_DIAGNOSTICS` | **Leave unset in production** | Only for internal/beta testing on a deployed environment — turns on the Diagnostics & Calculation Inspector panel for whoever opens Settings. Off automatically whenever `NODE_ENV=production` unless this is explicitly set to `"true"`. |
+| `SHOPIFY_APP_STORE_SLUG` | Optional | Needed for the review-request banner to deep-link to the real App Store listing; falls back to a placeholder slug until set. |
 
 ---
 
@@ -99,7 +125,9 @@ Below is the exact math and data source for each.
 
 ### 3.1 Automated coverage
 
-`app/services/audit.server.test.ts` has **41 vitest tests** covering `computeHealthScore`, `round2`, `daysAgoIso`, `insufficientData`, `errorLeak`, all 4 audit functions (including exact-threshold boundary cases: FX right at the $1/mo line, return rate right at the 8% benchmark, 5-signature bloat stacking, 8-offender/10-refund truncation to top-5), `numericId`, full `runAudit()` end-to-end paths, and the GraphQL throttle-retry + `VARIANTS_QUERY` pagination behavior added Sep 8. Run with:
+**52 vitest tests total**, all in `app/services/audit.server.test.ts` (the simulation module and its own 4 tests were deleted Sep 9 along with `qaSimulator.server.ts`), run with:
+
+- Covers `computeHealthScore`, `round2`, `daysAgoIso`, `insufficientData`, `errorLeak`, all 4 audit functions (including exact-threshold boundary cases: FX right at the $1/mo line, return rate right at the 8% benchmark, 5-signature bloat stacking, and 30-offender/30-refund/1-FX-order itemization truncated to `MODAL_DETAIL_CAP` (25)), `numericId`, full `runAudit()` end-to-end paths, and the GraphQL throttle-retry + `VARIANTS_QUERY` pagination behavior (Sep 8). New Sep 9: the `auditAppBloatLeak` `error` vs. `insufficient_data` distinction (a genuine GraphQL `errors` response now correctly surfaces as `error` — including updating the two pre-existing throttle-exhausted/non-throttled-error tests, which previously asserted the old, incorrect `insufficient_data` behavior), plus itemized-field assertions for negative-margin SKUs (`sku`/`variantId`/`productId`/`actionHref`), FX offending orders (`name`/`foreignAmount`/`foreignCurrency`/`estimatedDrag`), and refunded orders (`name`/`createdAt`/`refundedAmount`).
 
 ```
 npm test
@@ -110,12 +138,12 @@ This should pass with 0 failures before every deploy.
 ### 3.2 Manual seeding steps (per leak, on the dev store)
 
 1. **FX Drag → "leaking":** place a test order using a checkout market/currency different from the shop's base currency (e.g. shop is USD, checkout in EUR/GBP via a test payment method). Repeat until cumulative cross-border order value in the trailing 30 days exceeds **~$55.56** (0.018 × $55.56 ≈ $1.00, crossing the threshold).
-2. **Negative Margin SKU → "leaking":** pick any in-stock variant, set its price (e.g. $20) and "Cost per item" (e.g. $17) so that `price − cost − $5 shipping < 0` and `marginPercent` falls under 20%. Confirm it appears in the "Worst Offenders" list in the detail modal, sorted correctly.
+2. **Negative Margin SKU → "leaking":** pick any in-stock variant, set its price (e.g. $20) and "Cost per item" (e.g. $17) so that `price − cost − $5 shipping < 0` and `marginPercent` falls under 20%. Confirm it appears in the "Worst Offenders" table inside the "View Details" modal (SKU, price, cost, shipping, net margin, and an `Edit Variant in Shopify ↗` link), sorted correctly.
 3. **Script/App Bloat → "leaking":** manually add a `<script>` tag matching one of the 7 known signatures (e.g. a Loox-style snippet) into the main theme's `layout/theme.liquid`, even without the real app installed, to simulate an orphaned script. Confirm the leak fires and the "Clean Leftover Scripts" action opens the theme code editor.
-4. **Return Drift → "leaking":** place at least 5 orders within 60 days, then refund enough of them that the refund rate exceeds 9% (8% benchmark + 1% drift tolerance). Confirm refunded orders appear (capped at 5) in the detail modal.
+4. **Return Drift → "leaking":** place at least 5 orders within 60 days, then refund enough of them that the refund rate exceeds 9% (8% benchmark + 1% drift tolerance). Confirm refunded orders appear (capped at 25) as a table in the "View Details" modal, each with a `View Order ↗` link.
 5. **Insufficient data:** on a brand-new/empty dev store (or a fresh scope with 0 orders), confirm all checks correctly show "insufficient data" rather than a false "healthy" or a crash.
 6. **Review banner:** trigger the banner's display condition, dismiss it, reload — confirm it stays hidden; use "Remind Me Later," confirm it reappears only after 7 days (or adjust the clock/DB field manually to verify the snooze logic without waiting a week).
-7. **Feedback loop:** submit feedback from the dashboard, confirm it appears in Settings → "Feedback You've Sent," and confirm the Resend notification email arrives (check spam folder — current sender is on Resend's onboarding/shared domain, which commonly lands in spam until a custom sending domain is verified).
+7. **Feedback loop:** submit feedback from the dashboard, confirm it appears in Settings → "Feedback You've Sent" (only visible with `SHOW_QA_DIAGNOSTICS` on — see Section 2), and confirm the Resend notification email arrives (check spam folder — current sender is on Resend's onboarding/shared domain, which commonly lands in spam until a custom sending domain is verified).
 
 ---
 
@@ -142,4 +170,14 @@ This should pass with 0 failures before every deploy.
 
 ---
 
-*This document reflects the codebase as of 2026-09-08. Update it whenever the audit formulas, billing plan, or persistence strategy change.*
+---
+
+## 5. Simulation layer removal — schema cleanup (Sep 9)
+
+`ShopSettings.activeSimulationScenario` (added Sep 8 for the now-deleted QA simulator) was dropped via a new migration, `prisma/migrations/20260909100000_drop_simulation_scenario/`. The column was also removed directly from the local `dev.sqlite`, with the migration recorded as already-applied in `_prisma_migrations` so it won't be re-run or double-applied.
+
+**No manual step needed.** `shopify.web.toml` already runs `npx prisma generate` as a `predev` hook and `npx prisma migrate deploy` at the start of `dev` — the next `npm run dev` / `shopify app dev` automatically regenerates the Prisma Client to match the trimmed schema and confirms the migration is already applied. Production is unaffected the same way it always has been: the Fly.io Docker build runs `prisma generate`/`migrate deploy` fresh on every deploy.
+
+---
+
+*This document reflects the codebase as of 2026-09-09. Update it whenever the audit formulas, billing plan, or persistence strategy change.*

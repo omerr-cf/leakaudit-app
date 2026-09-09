@@ -12,6 +12,8 @@ import {
   numericId,
   round2,
   runAudit,
+  shouldRecordSnapshot,
+  SNAPSHOT_MIN_INTERVAL_MS,
   type AdminGraphQLClient,
   type LeakResult,
 } from "./audit.server";
@@ -101,7 +103,11 @@ describe("insufficientData", () => {
 
 describe("errorLeak", () => {
   it("captures a real Error's message", () => {
-    const leak = errorLeak("fx_fees", "Payment & FX Fee Drag", new Error("boom"));
+    const leak = errorLeak(
+      "fx_fees",
+      "Payment & FX Fee Drag",
+      new Error("boom"),
+    );
     expect(leak.status).toBe("error");
     expect(leak.details?.errorMessage).toBe("boom");
   });
@@ -114,7 +120,9 @@ describe("errorLeak", () => {
 
 describe("auditPaymentFxLeak", () => {
   it("reports insufficient_data with zero orders", async () => {
-    const admin = fakeAdmin({ FxLeakOrders: { data: { orders: { edges: [] } } } });
+    const admin = fakeAdmin({
+      FxLeakOrders: { data: { orders: { edges: [] } } },
+    });
     const result = await auditPaymentFxLeak(admin, "USD");
     expect(result.status).toBe("insufficient_data");
   });
@@ -130,7 +138,9 @@ describe("auditPaymentFxLeak", () => {
                   id: "1",
                   createdAt: "2026-01-01",
                   presentmentCurrencyCode: "USD",
-                  currentTotalPriceSet: { shopMoney: { amount: "100", currencyCode: "USD" } },
+                  currentTotalPriceSet: {
+                    shopMoney: { amount: "100", currencyCode: "USD" },
+                  },
                 },
               },
             ],
@@ -153,7 +163,9 @@ describe("auditPaymentFxLeak", () => {
                   id: "1",
                   createdAt: "2026-01-01",
                   presentmentCurrencyCode: "EUR",
-                  currentTotalPriceSet: { shopMoney: { amount: "1000", currencyCode: "USD" } },
+                  currentTotalPriceSet: {
+                    shopMoney: { amount: "1000", currencyCode: "USD" },
+                  },
                 },
               },
             ],
@@ -186,7 +198,14 @@ describe("auditAppBloatLeak", () => {
               {
                 id: "1",
                 name: "Dawn",
-                files: { nodes: [{ filename: "layout/theme.liquid", body: { content: "<html></html>" } }] },
+                files: {
+                  nodes: [
+                    {
+                      filename: "layout/theme.liquid",
+                      body: { content: "<html></html>" },
+                    },
+                  ],
+                },
               },
             ],
           },
@@ -195,6 +214,20 @@ describe("auditAppBloatLeak", () => {
     });
     const result = await auditAppBloatLeak(admin);
     expect(result.status).toBe("ok");
+  });
+
+  it("reports an 'error' status (not insufficient_data) when the themes query itself fails", async () => {
+    const admin = fakeAdmin({
+      ActiveThemeAsset: {
+        data: null,
+        errors: [
+          { message: "Argument 'roles' on Field 'themes' has an invalid value" },
+        ],
+      },
+    });
+    const result = await auditAppBloatLeak(admin);
+    expect(result.status).toBe("error");
+    expect(result.details?.errorMessage).toContain("invalid value");
   });
 
   it("flags leaking when a known orphan app signature is present", async () => {
@@ -228,7 +261,9 @@ describe("auditAppBloatLeak", () => {
 
 describe("auditNegativeMarginSkus", () => {
   it("reports insufficient_data with no in-stock variants", async () => {
-    const admin = fakeAdmin({ MarginVariants: { data: { productVariants: { edges: [] } } } });
+    const admin = fakeAdmin({
+      MarginVariants: { data: { productVariants: { edges: [] } } },
+    });
     const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
     expect(result.status).toBe("insufficient_data");
   });
@@ -282,15 +317,141 @@ describe("auditNegativeMarginSkus", () => {
     const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
     expect(result.status).toBe("ok");
   });
+
+  it("flips to leaking immediately (single scan, no threshold delay) as soon as one variant's cost exceeds price + shipping, and names it", async () => {
+    const admin = fakeAdmin({
+      MarginVariants: {
+        data: {
+          productVariants: {
+            edges: [
+              // Healthy variant — well above target margin.
+              {
+                node: {
+                  id: "v-healthy",
+                  title: "Default",
+                  price: "100.00",
+                  product: { title: "Good Widget" },
+                  inventoryItem: { unitCost: { amount: "20.00" } },
+                },
+              },
+              // unitCost (35) > price (20) + shipping (5) — a genuine
+              // negative-margin SKU, not just "below target".
+              {
+                node: {
+                  id: "v-bad",
+                  title: "Deluxe",
+                  price: "20.00",
+                  product: { title: "Loss Leader" },
+                  inventoryItem: { unitCost: { amount: "35.00" } },
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    expect(result.status).toBe("leaking");
+    expect(result.monthlyImpact).toBeGreaterThan(0);
+    const details = result.details as {
+      worstOffenders: { title: string }[];
+      offendersCount: number;
+    };
+    expect(details.offendersCount).toBe(1);
+    // The specific offending variant is named — "<Product> — <Variant>".
+    expect(details.worstOffenders[0].title).toBe("Loss Leader — Deluxe");
+  });
+
+  it("gives honest partial-coverage copy (not a false 'all healthy') when some variants still lack a cost", async () => {
+    const admin = fakeAdmin({
+      MarginVariants: {
+        data: {
+          productVariants: {
+            edges: [
+              // Has cost, healthy.
+              {
+                node: {
+                  id: "v-costed",
+                  title: "Default",
+                  price: "100.00",
+                  product: { title: "Widget" },
+                  inventoryItem: { unitCost: { amount: "20.00" } },
+                },
+              },
+              // No cost set at all — never actually checked.
+              {
+                node: {
+                  id: "v-uncosted",
+                  title: "Default",
+                  price: "50.00",
+                  product: { title: "Gadget" },
+                  inventoryItem: {},
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    expect(result.status).toBe("ok");
+    // Must NOT claim blanket health — 1 of 2 variants was never checked.
+    expect(result.headline).not.toContain("All SKUs are meeting");
+    expect(result.headline).toContain("1 of 2");
+    expect(result.headline).toContain("1 variant");
+    const details = result.details as {
+      skusChecked: number;
+      skusMissingCost: number;
+    };
+    expect(details.skusChecked).toBe(1);
+    expect(details.skusMissingCost).toBe(1);
+    // The deep-link to fix it stays present regardless of status.
+    expect(result.actionLabel).toBe("Set Cost Per Item");
+  });
+
+  it("needs-setup copy leads with the X of Y cost-set count when 0 variants have cost", async () => {
+    const admin = fakeAdmin({
+      MarginVariants: {
+        data: {
+          productVariants: {
+            edges: [
+              {
+                node: {
+                  id: "v1",
+                  title: "Default",
+                  price: "20.00",
+                  product: { title: "Widget" },
+                  inventoryItem: {},
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    expect(result.status).toBe("insufficient_data");
+    expect(result.headline).toContain("0 of 1");
+    expect(result.actionLabel).toBe("Set Cost Per Item");
+  });
 });
 
 describe("auditReturnRateDrift", () => {
-  function orderNode(id: string, refunded: number) {
+  function orderNode(id: string, refunded: number, name?: string) {
     return {
       node: {
         id,
+        name: name ?? `#${id}`,
+        createdAt: "2026-01-01T00:00:00Z",
         currentTotalPriceSet: { shopMoney: { amount: "100" } },
-        refunds: refunded > 0 ? [{ totalRefundedSet: { shopMoney: { amount: String(refunded) } } }] : [],
+        refunds:
+          refunded > 0
+            ? [
+                {
+                  totalRefundedSet: { shopMoney: { amount: String(refunded) } },
+                },
+              ]
+            : [],
       },
     };
   }
@@ -370,7 +531,9 @@ describe("runAudit", () => {
           throw new Error("simulated network failure");
         }
         if (query.includes("ShopCurrency")) {
-          return { json: async () => ({ data: { shop: { currencyCode: "USD" } } }) };
+          return {
+            json: async () => ({ data: { shop: { currencyCode: "USD" } } }),
+          };
         }
         return { json: async () => ({ data: {} }) };
       },
@@ -413,7 +576,11 @@ describe("insufficientData default action", () => {
 
 describe("errorLeak shape", () => {
   it("always routes 'Retry' to a dead href — the UI supplies the real retry handler", () => {
-    const leak = errorLeak("fx_fees", "Payment & FX Fee Drag", new Error("boom"));
+    const leak = errorLeak(
+      "fx_fees",
+      "Payment & FX Fee Drag",
+      new Error("boom"),
+    );
     expect(leak.actionLabel).toBe("Retry");
     expect(leak.actionHref).toBe("#");
     expect(leak.monthlyImpact).toBe(0);
@@ -448,6 +615,50 @@ describe("auditPaymentFxLeak — boundary cases", () => {
     expect(result.status).toBe("ok");
   });
 
+  it("itemizes fxOffendingOrders with order name, foreign amount, and estimated drag", async () => {
+    const admin = fakeAdmin({
+      FxLeakOrders: {
+        data: {
+          orders: {
+            edges: [
+              {
+                node: {
+                  id: "gid://shopify/Order/9001",
+                  name: "#1001",
+                  createdAt: "2026-01-05T00:00:00Z",
+                  presentmentCurrencyCode: "EUR",
+                  currentTotalPriceSet: {
+                    shopMoney: { amount: "1000", currencyCode: "USD" },
+                    presentmentMoney: { amount: "920", currencyCode: "EUR" },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = await auditPaymentFxLeak(admin, "USD");
+    expect(result.status).toBe("leaking");
+    const details = result.details as {
+      fxOffendingOrders: {
+        id: string;
+        name: string;
+        foreignAmount: number;
+        foreignCurrency: string;
+        estimatedDrag: number;
+        actionHref: string;
+      }[];
+    };
+    expect(details.fxOffendingOrders).toHaveLength(1);
+    expect(details.fxOffendingOrders[0].name).toBe("#1001");
+    expect(details.fxOffendingOrders[0].foreignAmount).toBe(920);
+    expect(details.fxOffendingOrders[0].foreignCurrency).toBe("EUR");
+    // 1000 * 1.8% = 18
+    expect(details.fxOffendingOrders[0].estimatedDrag).toBe(18);
+    expect(details.fxOffendingOrders[0].actionHref).toBe("/orders/9001");
+  });
+
   it("does not divide by zero when total revenue is 0", async () => {
     const admin = fakeAdmin({
       FxLeakOrders: {
@@ -459,7 +670,9 @@ describe("auditPaymentFxLeak — boundary cases", () => {
                   id: "1",
                   createdAt: "2026-01-01",
                   presentmentCurrencyCode: "EUR",
-                  currentTotalPriceSet: { shopMoney: { amount: "0", currencyCode: "USD" } },
+                  currentTotalPriceSet: {
+                    shopMoney: { amount: "0", currencyCode: "USD" },
+                  },
                 },
               },
             ],
@@ -474,51 +687,93 @@ describe("auditPaymentFxLeak — boundary cases", () => {
 });
 
 describe("auditNegativeMarginSkus — offender list details", () => {
-  function variantNode(id: string, price: string, cost: string, productId?: string) {
+  function variantNode(
+    id: string,
+    price: string,
+    cost: string,
+    productId?: string,
+    sku?: string,
+  ) {
     return {
       node: {
         id,
         title: "Default",
+        sku: sku ?? null,
         price,
-        product: { title: `Product ${id}`, ...(productId ? { id: productId } : {}) },
+        product: {
+          title: `Product ${id}`,
+          ...(productId ? { id: productId } : {}),
+        },
         inventoryItem: { unitCost: { amount: cost } },
       },
     };
   }
 
-  it("truncates worstOffenders to 5 in details even when more SKUs are leaking", async () => {
-    const edges = Array.from({ length: 8 }, (_, i) =>
-      variantNode(`v${i}`, "20.00", "16.00", `gid://shopify/Product/${i}`),
+  it("truncates worstOffenders to MODAL_DETAIL_CAP (25) in details even when more SKUs are leaking", async () => {
+    const edges = Array.from({ length: 30 }, (_, i) =>
+      variantNode(
+        `v${i}`,
+        "20.00",
+        "16.00",
+        `gid://shopify/Product/${i}`,
+        `SKU-${i}`,
+      ),
     );
     const admin = fakeAdmin({
       MarginVariants: { data: { productVariants: { edges } } },
     });
     const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
     expect(result.status).toBe("leaking");
-    expect(result.headline).toContain("8 SKUs");
-    const details = result.details as { worstOffenders: unknown[] };
-    expect(details.worstOffenders).toHaveLength(5);
+    expect(result.headline).toContain("30 SKUs");
+    const details = result.details as {
+      worstOffenders: {
+        sku: string | null;
+        variantId: string | null;
+        productId: string | null;
+        actionHref: string | null;
+      }[];
+    };
+    expect(details.worstOffenders).toHaveLength(25);
+    expect(details.worstOffenders[0].sku).toBe("SKU-0");
+    expect(details.worstOffenders[0].variantId).toBe("0");
+    expect(details.worstOffenders[0].productId).toBe("0");
+    expect(details.worstOffenders[0].actionHref).toBe(
+      "/products/0/variants/0",
+    );
   });
 
   it("gives a null actionHref when the product id can't be extracted", async () => {
     const admin = fakeAdmin({
       MarginVariants: {
-        data: { productVariants: { edges: [variantNode("v1", "20.00", "16.00")] } },
+        data: {
+          productVariants: { edges: [variantNode("v1", "20.00", "16.00")] },
+        },
       },
     });
     const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
-    const details = result.details as { worstOffenders: { actionHref: string | null }[] };
+    const details = result.details as {
+      worstOffenders: { actionHref: string | null }[];
+    };
     expect(details.worstOffenders[0].actionHref).toBeNull();
   });
 });
 
 describe("auditReturnRateDrift — boundary cases", () => {
-  function orderNode(id: string, refunded: number) {
+  function orderNode(id: string, refunded: number, name?: string) {
     return {
       node: {
         id,
+        name: name ?? `#${id}`,
+        createdAt: "2026-01-01T00:00:00Z",
         currentTotalPriceSet: { shopMoney: { amount: "100" } },
-        refunds: refunded > 0 ? [{ totalRefundedSet: { shopMoney: { amount: String(refunded) } } }] : [],
+        refunds:
+          refunded > 0
+            ? [
+                {
+                  totalRefundedSet: { shopMoney: { amount: String(refunded) } },
+                },
+              ]
+            : [],
       },
     };
   }
@@ -530,18 +785,36 @@ describe("auditReturnRateDrift — boundary cases", () => {
       orderNode("2", 50),
       ...Array.from({ length: 23 }, (_, i) => orderNode(`ok${i}`, 0)),
     ];
-    const admin = fakeAdmin({ RefundLeakOrders: { data: { orders: { edges } } } });
+    const admin = fakeAdmin({
+      RefundLeakOrders: { data: { orders: { edges } } },
+    });
     const result = await auditReturnRateDrift(admin);
     expect(result.status).toBe("ok");
   });
 
-  it("caps refundedOrders detail list at 5 even with more refunded orders", async () => {
-    const edges = Array.from({ length: 10 }, (_, i) => orderNode(`r${i}`, 20));
-    const admin = fakeAdmin({ RefundLeakOrders: { data: { orders: { edges } } } });
+  it("caps refundedOrders detail list at MODAL_DETAIL_CAP (25) even with more refunded orders", async () => {
+    const edges = Array.from({ length: 30 }, (_, i) =>
+      orderNode(`r${i}`, 20, `#${1000 + i}`),
+    );
+    const admin = fakeAdmin({
+      RefundLeakOrders: { data: { orders: { edges } } },
+    });
     const result = await auditReturnRateDrift(admin);
     expect(result.status).toBe("leaking");
-    const details = result.details as { refundedOrders: unknown[] };
-    expect(details.refundedOrders).toHaveLength(5);
+    const details = result.details as {
+      refundedOrders: {
+        id: string;
+        name: string;
+        createdAt: string;
+        refundedAmount: number;
+        actionHref: string;
+      }[];
+    };
+    expect(details.refundedOrders).toHaveLength(25);
+    expect(details.refundedOrders[0].name).toBe("#1000");
+    expect(details.refundedOrders[0].refundedAmount).toBe(20);
+    expect(details.refundedOrders[0].createdAt).toBe("2026-01-01T00:00:00Z");
+    expect(details.refundedOrders[0].actionHref).toBe("/orders/0");
   });
 });
 
@@ -559,7 +832,10 @@ describe("auditAppBloatLeak — multiple matches", () => {
                   nodes: [
                     {
                       filename: "layout/theme.liquid",
-                      body: { content: "<!-- klaviyo --><!-- loox.io --><!-- privy -->" },
+                      body: {
+                        content:
+                          "<!-- klaviyo --><!-- loox.io --><!-- privy -->",
+                      },
                     },
                   ],
                 },
@@ -595,7 +871,9 @@ describe("GraphQL throttle retry", () => {
         if (calls === 1) {
           return {
             json: async () => ({
-              errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+              errors: [
+                { message: "Throttled", extensions: { code: "THROTTLED" } },
+              ],
             }),
           };
         }
@@ -608,7 +886,12 @@ describe("GraphQL throttle retry", () => {
                     id: "gid://shopify/OnlineStoreTheme/1",
                     name: "Dawn",
                     files: {
-                      nodes: [{ filename: "layout/theme.liquid", body: { content: "<html></html>" } }],
+                      nodes: [
+                        {
+                          filename: "layout/theme.liquid",
+                          body: { content: "<html></html>" },
+                        },
+                      ],
                     },
                   },
                 ],
@@ -634,7 +917,9 @@ describe("GraphQL throttle retry", () => {
         calls += 1;
         return {
           json: async () => ({
-            errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }],
+            errors: [
+              { message: "Throttled", extensions: { code: "THROTTLED" } },
+            ],
           }),
         };
       },
@@ -644,9 +929,13 @@ describe("GraphQL throttle retry", () => {
     await vi.advanceTimersByTimeAsync(20000);
     const result = await resultPromise;
     expect(calls).toBe(5); // 1 initial attempt + 4 retries, then it stops
-    // Every retry came back throttled with no `data`, so the audit treats
-    // it as "couldn't read theme.liquid" rather than hanging or throwing.
-    expect(result.status).toBe("insufficient_data");
+    // Every retry came back throttled with no `data` AND a real GraphQL
+    // error — that's surfaced as an "error" status (with the diagnostic
+    // message attached) rather than silently misreported as
+    // "insufficient_data", so a real failure is never indistinguishable
+    // from "this store just doesn't have a theme to scan".
+    expect(result.status).toBe("error");
+    expect(result.details?.errorMessage).toContain("Throttled");
     vi.useRealTimers();
   });
 
@@ -657,14 +946,24 @@ describe("GraphQL throttle retry", () => {
         calls += 1;
         return {
           json: async () => ({
-            errors: [{ message: "Field not found", extensions: { code: "GRAPHQL_VALIDATION_FAILED" } }],
+            errors: [
+              {
+                message: "Field not found",
+                extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+              },
+            ],
           }),
         };
       },
     };
     const result = await auditAppBloatLeak(admin);
     expect(calls).toBe(1);
-    expect(result.status).toBe("insufficient_data");
+    // A genuine (non-throttled) GraphQL error is surfaced as "error", with
+    // the underlying message attached, instead of falling through to the
+    // generic "insufficient_data" copy — see auditAppBloatLeak's errors
+    // check.
+    expect(result.status).toBe("error");
+    expect(result.details?.errorMessage).toContain("Field not found");
   });
 });
 
@@ -672,7 +971,10 @@ describe("auditNegativeMarginSkus — pagination", () => {
   it("follows pageInfo.hasNextPage across multiple pages", async () => {
     let calls = 0;
     const admin: AdminGraphQLClient = {
-      async graphql(_query: string, options?: { variables?: Record<string, unknown> }) {
+      async graphql(
+        _query: string,
+        options?: { variables?: Record<string, unknown> },
+      ) {
         calls += 1;
         const after = options?.variables?.after;
         if (!after) {
@@ -759,5 +1061,76 @@ describe("auditNegativeMarginSkus — pagination", () => {
     expect(calls).toBe(8);
     const details = result.details as { skusChecked: number };
     expect(details.skusChecked).toBe(8);
+  });
+});
+
+describe("shouldRecordSnapshot — History page dedup policy", () => {
+  const baseReport = { healthScore: 80, totalMonthlyLeak: 100 };
+
+  it("always records the very first scan (no previous snapshot)", () => {
+    expect(shouldRecordSnapshot(null, baseReport)).toBe(true);
+  });
+
+  it("records when the health score changed, even if the leak total didn't", () => {
+    const previous = {
+      healthScore: 90,
+      totalMonthlyLeak: 100,
+      scannedAt: new Date(),
+    };
+    expect(shouldRecordSnapshot(previous, baseReport)).toBe(true);
+  });
+
+  it("records when the total monthly leak changed, even if health score didn't", () => {
+    const previous = {
+      healthScore: 80,
+      totalMonthlyLeak: 150,
+      scannedAt: new Date(),
+    };
+    expect(shouldRecordSnapshot(previous, baseReport)).toBe(true);
+  });
+
+  it("does NOT record an unchanged result on a passive reload shortly after the last snapshot", () => {
+    const now = new Date("2026-09-10T12:00:00Z");
+    const previous = {
+      healthScore: 80,
+      totalMonthlyLeak: 100,
+      scannedAt: new Date("2026-09-10T11:00:00Z"), // 1 hour ago
+    };
+    expect(shouldRecordSnapshot(previous, baseReport, { now })).toBe(false);
+  });
+
+  it("always records on an explicit manual Re-Scan Store click, even with an unchanged, recent result", () => {
+    const now = new Date("2026-09-10T12:00:00Z");
+    const previous = {
+      healthScore: 80,
+      totalMonthlyLeak: 100,
+      scannedAt: new Date("2026-09-10T11:59:00Z"), // 1 minute ago
+    };
+    expect(
+      shouldRecordSnapshot(previous, baseReport, {
+        now,
+        isManualRescan: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("records an unchanged result once 24 hours have elapsed since the last snapshot (heartbeat)", () => {
+    const previous = {
+      healthScore: 80,
+      totalMonthlyLeak: 100,
+      scannedAt: new Date("2026-09-09T12:00:00Z"),
+    };
+    const exactly24h = new Date(
+      previous.scannedAt.getTime() + SNAPSHOT_MIN_INTERVAL_MS,
+    );
+    const just23h59m = new Date(
+      previous.scannedAt.getTime() + SNAPSHOT_MIN_INTERVAL_MS - 60_000,
+    );
+    expect(
+      shouldRecordSnapshot(previous, baseReport, { now: exactly24h }),
+    ).toBe(true);
+    expect(
+      shouldRecordSnapshot(previous, baseReport, { now: just23h59m }),
+    ).toBe(false);
   });
 });
