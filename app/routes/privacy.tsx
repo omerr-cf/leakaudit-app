@@ -74,6 +74,16 @@ export default function Privacy() {
         mandatory GDPR compliance webhooks.
       </p>
 
+      <h2>Your rights (GDPR/CCPA)</h2>
+      <p>
+        You can request access to, correction of, or deletion of the data we
+        hold about your shop at any time by contacting us below. Uninstalling
+        the App triggers Shopify&apos;s mandatory compliance webhooks, which
+        cause us to automatically and permanently delete every record we hold
+        for your shop — settings, scan history, and feedback messages alike
+        — typically within 48 hours.
+      </p>
+
       <h2>Contact</h2>
       <p>
         Questions about this policy or your data can be sent to:{" "}
