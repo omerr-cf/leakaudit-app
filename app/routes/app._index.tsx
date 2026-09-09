@@ -375,6 +375,18 @@ export default function Index() {
   const rescanFetcher = useFetcher<typeof action>();
   const alertFetcher = useFetcher<typeof action>();
   const feedbackFetcher = useFetcher<typeof action>();
+  // Read straight off the element via a ref instead of `new FormData(form)`.
+  // @shopify/polaris-types shows <s-text-area> DOES declare `formAssociated`
+  // and backs its value with ElementInternals (same base class as the
+  // <s-email-field>/<s-number-field> fields the Settings page's native
+  // <Form> already submits successfully) — so FormData participation may
+  // well be fine. But this couldn't be confirmed live in a browser, and
+  // reading .value directly sidesteps the question entirely, matching how
+  // every other fetcher.submit() call in this file already passes explicit
+  // JS values rather than depending on native form-data collection.
+  const feedbackTextAreaRef = useRef<HTMLElementTagNameMap["s-text-area"] | null>(
+    null,
+  );
   const reviewFetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
   const wasScanning = useRef(false);
@@ -424,8 +436,7 @@ export default function Index() {
 
   const handleSubmitFeedback = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const message = String(form.get("message") ?? "").trim();
+    const message = String(feedbackTextAreaRef.current?.value ?? "").trim();
     if (!message) {
       shopify.toast.show("Type a message before sending.", { isError: true });
       return;
@@ -435,6 +446,9 @@ export default function Index() {
       { method: "post" },
     );
     event.currentTarget.reset();
+    if (feedbackTextAreaRef.current) {
+      feedbackTextAreaRef.current.value = "";
+    }
   };
 
   const handleLeaveReview = () => {
@@ -1021,6 +1035,7 @@ export default function Index() {
         <form onSubmit={handleSubmitFeedback}>
           <s-stack direction="block" gap="base">
             <s-text-area
+              ref={feedbackTextAreaRef}
               name="message"
               label="What's working, what's confusing, what's missing?"
               placeholder="Tell us anything — bugs, ideas, confusing bits."
