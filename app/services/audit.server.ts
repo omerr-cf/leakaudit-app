@@ -81,12 +81,31 @@ const MODAL_DETAIL_CAP = 25;
 // "metafields.pricing.cost" — that's not a real Shopify field (cost is
 // InventoryItem.unitCost, not a custom metafield most stores have), so it
 // was dropped here; adding it back would either be silently ignored or
-// error depending on Shopify's version. This is also routed through
-// adminUrl() in the dashboard, which already prepends
-// "https://admin.shopify.com/store/<handle>", so no extra "/admin" prefix
-// is needed here.
+// error depending on Shopify's version. `edit=variants.price,...` (not
+// bare `price`) is what actually pre-opens the Price and Cost per item
+// columns on load — without the `variants.` prefix the bulk editor still
+// opens but the merchant has to manually add both columns via "Columns"
+// first. This is also routed through adminUrl() in the dashboard, which
+// already prepends "https://admin.shopify.com/store/<handle>", so no
+// extra "/admin" prefix is needed here.
 const BULK_EDIT_VARIANT_COSTS_PATH =
-  "/bulk?resource_name=ProductVariant&edit=price,inventory_item.cost";
+  "/bulk?resource_name=ProductVariant&edit=variants.price,inventory_item.cost";
+
+// Scopes the bulk-editor deep link to the specific flagged variants when
+// we know which ones they are (e.g. the negative-margin offenders), so
+// the spreadsheet opens pre-selected to exactly the rows that need
+// fixing instead of the merchant's entire catalog. Capped the same as
+// the "View Details" modal (MODAL_DETAIL_CAP) so the URL never grows
+// unreasonably long on a store with hundreds of offenders. Falls back to
+// the plain (unscoped) link when no ids are available.
+function bulkEditVariantCostsHref(variantIds: (string | null)[] = []): string {
+  const ids = variantIds
+    .filter((id): id is string => Boolean(id))
+    .slice(0, MODAL_DETAIL_CAP);
+  return ids.length > 0
+    ? `${BULK_EDIT_VARIANT_COSTS_PATH}&ids=${ids.join(",")}`
+    : BULK_EDIT_VARIANT_COSTS_PATH;
+}
 
 // Health score: start at 100, deduct per problem found. "insufficient_data"
 // doesn't count against you — it just means the check hasn't got enough
@@ -375,6 +394,7 @@ interface ThemeFileNode {
 interface ThemeNode {
   id: string;
   name: string;
+  role: string;
   files: { nodes: ThemeFileNode[] };
 }
 interface ThemesResponse {
@@ -383,10 +403,11 @@ interface ThemesResponse {
 
 const THEME_QUERY = `#graphql
   query ActiveThemeAsset {
-    themes(first: 5, roles: [[MAIN]]) {
+    themes(first: 10) {
       nodes {
         id
         name
+        role
         files(filenames: ["layout/theme.liquid"]) {
           nodes {
             filename
@@ -401,15 +422,16 @@ const THEME_QUERY = `#graphql
     }
   }
 `;
-// IMPORTANT: the "themes" root query's `roles` argument is typed
-// [[ThemeRole!]] (a doubly-nested list) in Shopify's Admin API schema —
-// NOT [ThemeRole!]. Passing `roles: [MAIN]` (singly-nested) is a GraphQL
-// argument-type mismatch that Shopify rejects with a query error, which
-// is exactly why this check was failing with "Couldn't read theme.liquid"
-// on the live store: the whole `themes` query errored out, so
-// `data.themes` came back undefined — never a real "no theme" case at
-// all. Verified against https://shopify.dev/docs/api/admin-graphql/latest/queries/themes
-// (roles: [[ThemeRole!]]) for the 2026-07 API version this app targets.
+// IMPORTANT: an earlier version of this query tried to filter server-side
+// with a `roles:` argument, but Shopify rejected every shape that was
+// tried (`roles: [MAIN]` AND `roles: [[MAIN]]`) with a live "Argument
+// 'roles' on Field 'themes' has an invalid value" error — the exact
+// expected nesting isn't worth chasing across API versions/schemas. The
+// bulletproof fix: don't filter in GraphQL at all. Fetch the first 10
+// themes (a store realistically never has more unpublished/duplicate
+// themes than that) with their `role`, and pick the MAIN one in plain
+// TypeScript below — this can never break on a GraphQL argument-type
+// mismatch again, regardless of Shopify API version.
 
 // Signatures of scripts/snippets commonly left behind by apps merchants
 // have since UNINSTALLED. Extend this list as you learn your ICP's stack.
@@ -448,7 +470,7 @@ export async function auditAppBloatLeak(admin: AdminContext): Promise<LeakResult
     );
   }
 
-  const theme = data.data?.themes?.nodes?.[0];
+  const theme = data.data?.themes?.nodes?.find((t) => t.role === "MAIN");
   const body = theme?.files?.nodes?.[0]?.body?.content;
 
   if (!body) {
@@ -654,7 +676,7 @@ export async function auditNegativeMarginSkus(
             `The ${withCost.length} of ${variants.length} variants with cost data set are all meeting your ${settings.targetMarginPercent}% target margin — but ${skusMissingCost} variant${skusMissingCost > 1 ? "s" : ""} still ${skusMissingCost > 1 ? "don't" : "doesn't"} have a cost set, so ${skusMissingCost > 1 ? "they haven't" : "it hasn't"} been checked yet.`
           : `All SKUs are meeting your ${settings.targetMarginPercent}% target margin after estimated shipping.`,
     actionLabel: "Set Cost Per Item",
-    actionHref: BULK_EDIT_VARIANT_COSTS_PATH,
+    actionHref: bulkEditVariantCostsHref(offenders.map((o) => o.variantId)),
     details: {
       skusChecked: withCost.length,
       skusMissingCost,

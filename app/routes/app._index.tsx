@@ -219,6 +219,21 @@ const LEAK_ACTION_TIPS: Record<LeakResult["id"], string> = {
     "💡 Fix: Check sizing charts, product photos/descriptions, and packaging for your most-returned items — most return spikes trace back to expectation mismatches, not defects.",
 };
 
+// Action-verb copy for a *leaking* card's primary button — more
+// motivating than the leak's own generic actionLabel ("Set Cost Per
+// Item", "Review FX Routing") on its own, without changing where the
+// button actually links to (still leak.actionHref via adminUrl() below).
+const LEAK_PRIMARY_ACTION_LABEL: Record<
+  LeakResult["id"],
+  (offendersCount: number) => string
+> = {
+  negative_margin: (count) =>
+    `Fix ${count} Negative-Margin SKU${count === 1 ? "" : "s"} in Bulk ↗`,
+  fx_fees: () => "Review FX Routing in Settings ↗",
+  app_bloat: () => "Clean Leftover Scripts Now ↗",
+  return_drift: () => "Investigate Return Drivers ↗",
+};
+
 // Turns a relative admin path (e.g. "/products/123") into the full
 // admin.shopify.com URL for this shop, so action buttons actually go
 // somewhere instead of doing nothing. `target="_top"` on the <s-button>
@@ -433,6 +448,38 @@ export default function Index() {
     );
   };
 
+  // Builds a clean, plain-text 3-line summary (shop, total recoverable
+  // $/mo, and which checks are actually leaking) and copies it to the
+  // clipboard — e.g. for pasting into a Slack message or a note to
+  // whoever owns fixing these. Best-effort: the Clipboard API needs a
+  // secure context, which the embedded admin iframe already is, but this
+  // still fails softly (error toast, nothing thrown) if a browser ever
+  // blocks it.
+  const handleCopySummary = async () => {
+    const leakingTitles = liveReport.leaks
+      .filter((l) => l.status === "leaking")
+      .map((l) => l.title);
+    const leakingTotal = liveReport.leaks.filter(
+      (l) => l.status === "leaking",
+    ).length;
+    const summary = [
+      `LeakAudit Summary — ${liveReport.shopDomain}`,
+      `Total Recoverable: ${formatMoney(liveReport.totalMonthlyLeak, liveReport.currencyCode)}/month across ${leakingTotal} leak${leakingTotal === 1 ? "" : "s"}`,
+      leakingTitles.length > 0
+        ? `Top issues: ${leakingTitles.join(", ")}`
+        : "No active leaks detected.",
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(summary);
+      shopify.toast.show("Leak summary copied to clipboard.");
+    } catch {
+      shopify.toast.show("Couldn't copy to clipboard — try again.", {
+        isError: true,
+      });
+    }
+  };
+
   const leakingCount = liveReport.leaks.filter(
     (l) => l.status === "leaking",
   ).length;
@@ -484,6 +531,30 @@ export default function Index() {
           )}
         </s-stack>
       </s-section>
+
+      {liveReport.totalMonthlyLeak > 0 && (
+        <s-section>
+          <s-stack direction="block" gap="base">
+            {!billingEnabled && (
+              <s-badge tone="success">
+                🎉 Founder Beta: 100% Free Lifetime Access
+              </s-badge>
+            )}
+            <s-banner
+              tone="success"
+              heading={`Total Money You Can Recover Today: ${formatMoney(liveReport.totalMonthlyLeak, liveReport.currencyCode)} / month`}
+            >
+              <s-paragraph>
+                Resolving the flagged items below will immediately protect
+                your net margin.
+              </s-paragraph>
+              <s-button slot="secondary-actions" onClick={handleCopySummary}>
+                📋 Copy Leak Summary
+              </s-button>
+            </s-banner>
+          </s-stack>
+        </s-section>
+      )}
 
       <s-section heading={liveReport.shopDomain}>
         <s-banner
@@ -629,10 +700,15 @@ export default function Index() {
                   </s-button>
                 ) : (
                   <s-button
+                    {...(leak.status === "leaking"
+                      ? { variant: "primary" }
+                      : {})}
                     href={adminUrl(liveReport.shopDomain, leak.actionHref)}
                     target="_top"
                   >
-                    {leak.actionLabel}
+                    {leak.status === "leaking"
+                      ? LEAK_PRIMARY_ACTION_LABEL[leak.id](offenders.length)
+                      : leak.actionLabel}
                   </s-button>
                 )}
                 {hasDetails && (

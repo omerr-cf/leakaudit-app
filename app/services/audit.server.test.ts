@@ -198,6 +198,7 @@ describe("auditAppBloatLeak", () => {
               {
                 id: "1",
                 name: "Dawn",
+                role: "MAIN",
                 files: {
                   nodes: [
                     {
@@ -239,6 +240,46 @@ describe("auditAppBloatLeak", () => {
               {
                 id: "1",
                 name: "Dawn",
+                role: "MAIN",
+                files: {
+                  nodes: [
+                    {
+                      filename: "layout/theme.liquid",
+                      body: { content: "<!-- klaviyo onsite tracking -->" },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = await auditAppBloatLeak(admin);
+    expect(result.status).toBe("leaking");
+    expect(result.monthlyImpact).toBe(45);
+  });
+
+  it("picks the MAIN theme's theme.liquid even when it isn't the first node returned", async () => {
+    // The query no longer filters by `roles:` in GraphQL at all (Shopify
+    // rejected every shape that was tried) — it fetches up to 10 themes
+    // and picks the MAIN one in TypeScript. This proves that filter
+    // actually works: an unpublished theme listed first must be ignored.
+    const admin = fakeAdmin({
+      ActiveThemeAsset: {
+        data: {
+          themes: {
+            nodes: [
+              {
+                id: "gid://shopify/OnlineStoreTheme/1",
+                name: "Old Draft Theme",
+                role: "UNPUBLISHED",
+                files: { nodes: [] },
+              },
+              {
+                id: "gid://shopify/OnlineStoreTheme/2",
+                name: "Dawn",
+                role: "MAIN",
                 files: {
                   nodes: [
                     {
@@ -756,6 +797,39 @@ describe("auditNegativeMarginSkus — offender list details", () => {
     };
     expect(details.worstOffenders[0].actionHref).toBeNull();
   });
+
+  it("scopes the top-level 'Set Cost Per Item' bulk-editor link to the flagged variant ids, with pre-selected columns", async () => {
+    const edges = [
+      variantNode("v1", "20.00", "16.00"),
+      variantNode("v2", "20.00", "16.00"),
+    ];
+    const admin = fakeAdmin({
+      MarginVariants: { data: { productVariants: { edges } } },
+    });
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    expect(result.status).toBe("leaking");
+    // variants.price (not bare `price`) is what actually pre-opens the
+    // Price column alongside inventory_item.cost on load.
+    expect(result.actionHref).toContain(
+      "edit=variants.price,inventory_item.cost",
+    );
+    // Scoped to exactly the two flagged variant ids, not the whole catalog.
+    expect(result.actionHref).toContain("&ids=1,2");
+  });
+
+  it("caps the scoped bulk-editor ids at MODAL_DETAIL_CAP (25) so the URL never grows unbounded", async () => {
+    const edges = Array.from({ length: 30 }, (_, i) =>
+      variantNode(`v${i}`, "20.00", "16.00"),
+    );
+    const admin = fakeAdmin({
+      MarginVariants: { data: { productVariants: { edges } } },
+    });
+    const result = await auditNegativeMarginSkus(admin, DEFAULT_AUDIT_SETTINGS);
+    const idsParam = new URL(
+      `https://example.com${result.actionHref}`,
+    ).searchParams.get("ids");
+    expect(idsParam?.split(",")).toHaveLength(25);
+  });
 });
 
 describe("auditReturnRateDrift — boundary cases", () => {
@@ -828,6 +902,7 @@ describe("auditAppBloatLeak — multiple matches", () => {
               {
                 id: "1",
                 name: "Dawn",
+                role: "MAIN",
                 files: {
                   nodes: [
                     {
@@ -885,6 +960,7 @@ describe("GraphQL throttle retry", () => {
                   {
                     id: "gid://shopify/OnlineStoreTheme/1",
                     name: "Dawn",
+                    role: "MAIN",
                     files: {
                       nodes: [
                         {
