@@ -16,10 +16,10 @@ export default function App() {
   return (
     <div className={styles.index}>
       <div className={styles.content}>
-        <span className={styles.badge}>60-SECOND STORE AUDIT</span>
+        <span className={styles.badge}>🎉 Founder Beta: 100% Free</span>
 
         <h1 className={styles.heading}>
-          Find the cash your store is quietly leaking.
+          LeakAudit: 60-Second Profit &amp; Cost Leak Auditor for Shopify
         </h1>
 
         <p className={styles.text}>
@@ -30,21 +30,26 @@ export default function App() {
         </p>
 
         {showForm && (
-          <Form className={styles.form} method="post" action="/auth/login">
+          <Form
+            className={styles.form}
+            method="post"
+            action="/auth/login"
+            reloadDocument
+          >
             <label className={styles.label}>
               <span>Shop domain</span>
               <input
                 className={styles.input}
                 type="text"
                 name="shop"
-                placeholder="my-shop-domain.myshopify.com"
+                placeholder="your-store.myshopify.com"
               />
               <span className={styles.hint}>
                 e.g. my-shop-domain.myshopify.com
               </span>
             </label>
             <button className={styles.button} type="submit">
-              Run My Free Audit
+              ⚡ Install Free Founder Beta
             </button>
           </Form>
         )}
