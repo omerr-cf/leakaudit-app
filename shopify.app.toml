@@ -30,7 +30,7 @@ api_version = "2026-10"
   shop_deletion_url = "/webhooks/shop/redact"
 
 [auth]
-redirect_urls = [ "https://leakaudit-app.fly.dev/api/auth" ]
+redirect_urls = [ "https://leakaudit-app.fly.dev/auth/callback" ]
 
 [build]
 automatically_update_urls_on_dev = true

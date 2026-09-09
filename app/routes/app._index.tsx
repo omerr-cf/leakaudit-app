@@ -151,8 +151,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { feedback: { saved: false, reason: "Feedback was empty." } };
     }
     await db.feedback.create({ data: { shop: session.shop, message } });
-    // Best-effort — feedback is already safely saved above either way.
-    await sendFeedbackNotification(session.shop, message);
+    // Best-effort — feedback is already safely saved above either way, but
+    // log a non-sent result so a misconfigured/missing SUPPORT_NOTIFICATION_EMAIL
+    // (or Resend) shows up in `fly logs` instead of failing invisibly forever.
+    const notification = await sendFeedbackNotification(session.shop, message);
+    if (!notification.sent) {
+      console.error(
+        `[LeakAudit] feedback notification email not sent: ${notification.reason}`,
+      );
+    }
     return { feedback: { saved: true } };
   }
 
