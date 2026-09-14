@@ -195,7 +195,7 @@ export default function History() {
 
   return (
     <s-page heading="Scan History">
-      <s-button slot="primary-action" href="/app">
+      <s-button slot="primary-action" variant="primary" href="/app">
         Back to Home
       </s-button>
 

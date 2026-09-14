@@ -522,6 +522,7 @@ export default function Index() {
     <s-page heading="LeakAudit">
       <s-button
         slot="primary-action"
+        variant="primary"
         onClick={handleRescan}
         {...(isScanning ? { loading: true } : {})}
       >
