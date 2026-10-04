@@ -111,11 +111,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
   const savings = await recordSnapshotAndSummarize(session.shop, report);
 
-  // Show the review-request banner only when there's actual recoverable
-  // cash to show off, the merchant hasn't already told us they reviewed,
-  // and any "remind me later" snooze has expired.
+  // Show the review-request banner only at a real moment of value: a later
+  // scan shows a lower leak than the merchant's first scan (i.e. they acted
+  // on a finding and it worked). Never on a first session / onboarding
+  // (Shopify App Store requirement 1.3), never once they've dismissed it,
+  // and not while a "remind me later" snooze is active.
   const showReviewBanner =
-    report.totalMonthlyLeak > 0 &&
+    savings.recoveredMonthlyEstimate > 0 &&
     !settings.reviewBannerDismissedAt &&
     (!settings.reviewBannerRemindAt ||
       settings.reviewBannerRemindAt <= new Date());
@@ -370,7 +372,6 @@ export default function Index() {
     savings,
     showReviewBanner,
     reviewUrl,
-    billingEnabled,
   } = useLoaderData<typeof loader>();
   const rescanFetcher = useFetcher<typeof action>();
   const alertFetcher = useFetcher<typeof action>();
@@ -531,11 +532,6 @@ export default function Index() {
 
       <s-section>
         <s-stack direction="inline" gap="base">
-          {!billingEnabled && (
-            <s-badge tone="success">
-              🎉 Founder Beta: Free Lifetime Access
-            </s-badge>
-          )}
           <s-badge tone={healthTone(liveReport.healthScore)}>
             Health Score: {liveReport.healthScore}/100
           </s-badge>
@@ -557,11 +553,6 @@ export default function Index() {
       {liveReport.totalMonthlyLeak > 0 && (
         <s-section>
           <s-stack direction="block" gap="base">
-            {!billingEnabled && (
-              <s-badge tone="success">
-                🎉 Founder Beta: 100% Free Lifetime Access
-              </s-badge>
-            )}
             <s-banner
               tone="success"
               heading={`Total Money You Can Recover Today: ${formatMoney(liveReport.totalMonthlyLeak, liveReport.currencyCode)} / month`}
@@ -615,8 +606,9 @@ export default function Index() {
         <s-section>
           <s-banner heading="Finding LeakAudit helpful?" tone="info">
             <s-paragraph>
-              If we helped you spot a leak today, leaving a quick review in the
-              Shopify App Store helps our independent team grow!
+              Your estimated monthly leak is down since your first scan. If
+              LeakAudit helped, a quick review in the Shopify App Store helps
+              other merchants find it.
             </s-paragraph>
             <s-button
               slot="secondary-actions"
@@ -1023,13 +1015,6 @@ export default function Index() {
           </s-paragraph>
           <s-link href="/app/history">View full scan history →</s-link>
         </s-stack>
-      </s-section>
-
-      <s-section slot="aside" heading="Early Access Beta">
-        <s-paragraph>
-          🎉 100% free while in private beta. Thank you for helping us shape
-          LeakAudit!
-        </s-paragraph>
       </s-section>
 
       <s-section slot="aside" heading="Send Us Feedback">

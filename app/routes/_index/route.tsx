@@ -16,7 +16,7 @@ export default function App() {
   return (
     <div className={styles.index}>
       <div className={styles.content}>
-        <span className={styles.badge}>🎉 Founder Beta: 100% Free</span>
+        <span className={styles.badge}>Free during launch</span>
 
         <h1 className={styles.heading}>
           LeakAudit: 60-Second Profit &amp; Cost Leak Auditor for Shopify
@@ -49,7 +49,7 @@ export default function App() {
               </span>
             </label>
             <button className={styles.button} type="submit">
-              ⚡ Install Free Founder Beta
+              ⚡ Install LeakAudit
             </button>
           </Form>
         )}
