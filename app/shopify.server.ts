@@ -7,6 +7,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import { sendInstallNotification } from "./services/email.server";
 
 // Billing is scaffolded but OFF by default — early beta is free. Flip
 // BILLING_ENABLED=true in your .env once you're ready to start charging.
@@ -69,6 +70,20 @@ const shopify = shopifyApp({
         },
       ],
       trialDays: 14,
+    },
+  },
+  hooks: {
+    // Fires after every completed OAuth round-trip (a fresh install, and
+    // also a re-auth/scope-update -- see the comment on
+    // sendInstallNotification for why that's expected, not a bug).
+    // Deliberately NOT awaited here: fire-and-forget with its own
+    // try/catch, so a slow or failing notification email can never block
+    // or delay the merchant's redirect into the app (2026-09-14, per
+    // Gemini).
+    afterAuth: async ({ session }) => {
+      sendInstallNotification(session.shop).catch((err) => {
+        console.error(`[LeakAudit] install notification failed for ${session.shop}:`, err);
+      });
     },
   },
 });

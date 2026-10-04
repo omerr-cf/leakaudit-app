@@ -89,6 +89,42 @@ export async function sendFeedbackNotification(
   return { sent: true };
 }
 
+// Notifies you (the app builder) the moment a merchant's OAuth session is
+// established -- i.e. right after an install (fired from the afterAuth
+// hook in shopify.server.ts). Fire-and-forget by design: the caller never
+// awaits this before completing the OAuth redirect, so a slow or failing
+// Resend call can never block or delay a merchant finishing installation.
+// Reuses SUPPORT_NOTIFICATION_EMAIL (the same address feedback already
+// goes to) rather than a separate env var -- same "notify the operator"
+// channel, not a materially different one. Note: afterAuth also fires on
+// a re-auth/scope-update round-trip, not only a brand-new install, so an
+// occasional notification for a returning merchant is expected, not a bug.
+export async function sendInstallNotification(shop: string): Promise<SendAlertResult> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const to = process.env.SUPPORT_NOTIFICATION_EMAIL;
+  if (!apiKey || !to) {
+    return {
+      sent: false,
+      reason:
+        "Not emailed (RESEND_API_KEY and/or SUPPORT_NOTIFICATION_EMAIL not set) -- install still succeeded, this notification is best-effort only.",
+    };
+  }
+
+  const resend = new Resend(apiKey);
+  const environment = process.env.NODE_ENV === "production" ? "Production (Fly.io)" : "Development";
+  const { error } = await resend.emails.send({
+    from: FROM_ADDRESS,
+    to,
+    subject: `\ud83c\udf89 New Shopify Store Installed LeakAudit: ${shop}`,
+    html: `<p>A new merchant has just installed LeakAudit!</p><p><strong>Store:</strong> ${shop}<br/><strong>Installed At:</strong> ${new Date().toISOString()}<br/><strong>Environment:</strong> ${environment}</p>`,
+  });
+
+  if (error) {
+    return { sent: false, reason: error.message };
+  }
+  return { sent: true };
+}
+
 // Sends one alert email summarizing the given audit report. Returns
 // {sent: false, reason} instead of throwing when there's no API key
 // configured yet, so callers (e.g. a "Send Test Alert" button) can show a
