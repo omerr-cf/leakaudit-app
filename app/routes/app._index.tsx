@@ -23,7 +23,7 @@ import { badgeLabel, formatMoney, healthTone, toneFor } from "../utils/format";
 // SHOPIFY_APP_STORE_SLUG in .env (or a Fly.io secret) and the review
 // banner's link updates automatically, no code change needed.
 const APP_STORE_SLUG = process.env.SHOPIFY_APP_STORE_SLUG || "YOUR_APP_SLUG";
-const REVIEW_URL = `https://apps.shopify.com/${APP_STORE_SLUG}#modal-show=ReviewListingModal`;
+const REVIEW_URL = `https://apps.shopify.com/${APP_STORE_SLUG}#modal-show=WriteReviewModal`;
 // How long "Remind Me Later" snoozes the review banner for.
 const REVIEW_REMIND_DAYS = 7;
 
