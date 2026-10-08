@@ -977,7 +977,7 @@ export default function Index() {
       <s-section slot="aside" heading="Recoverable Cash Today">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Get a weekly email the moment a new leak appears.
+            Get a weekly email with your latest leak summary. Turn it off any time.
           </s-paragraph>
           <s-button onClick={handleToggleAlert}>
             {liveAlertEnabled ? "Weekly Alerts: On" : "Weekly Alerts: Off"}

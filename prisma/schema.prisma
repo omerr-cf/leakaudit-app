@@ -41,6 +41,8 @@ model ShopSettings {
   id                    String    @id @default(cuid())
   shop                  String    @unique
   weeklyAlertEnabled    Boolean   @default(false)
+  // Last time the weekly scheduler emailed this shop (null = never).
+  lastWeeklyAlertAt     DateTime?
   shippingCostPerOrder  Float     @default(5.0)
   targetMarginPercent   Float     @default(20)
   notificationEmail     String?

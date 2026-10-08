@@ -284,9 +284,10 @@ export default function Settings() {
       <s-section heading="Weekly alert email">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Send yourself a real test email right now, using whatever
-            notification email is currently saved above (save it first if you
-            just changed it).
+            When Weekly Alerts is switched on (on the Home page), LeakAudit
+            scans your store and emails this address once a week. You can send
+            yourself a real sample right now, using whatever notification email
+            is currently saved above (save it first if you just changed it).
           </s-paragraph>
           <s-button
             onClick={handleSendTestAlert}
@@ -295,9 +296,9 @@ export default function Settings() {
             Send Test Alert Now
           </s-button>
           <s-paragraph color="subdued">
-            This sends one email immediately — it doesn&apos;t yet run
-            automatically on a weekly schedule (that needs the app deployed
-            somewhere that can run a schedule, not just your laptop).
+            The button sends one sample email immediately. Weekly emails go
+            out automatically and can be turned off any time from the Home
+            page.
           </s-paragraph>
         </s-stack>
       </s-section>

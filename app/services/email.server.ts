@@ -54,6 +54,11 @@ function reportToHtml(report: AuditReport): string {
         Scanned ${new Date(report.scannedAt).toLocaleString()}. Open LeakAudit
         in your Shopify Admin to take action on any leak above.
       </p>
+      <p style="color:#8a8f9c; font-size: 0.85rem;">
+        You're receiving this because Weekly Alerts is switched on for
+        ${report.shopDomain}. To stop these emails, open LeakAudit in your
+        Shopify Admin and switch Weekly Alerts off on the Home page.
+      </p>
     </div>
   `;
 }
