@@ -1,4 +1,8 @@
-import { runAudit, type AdminGraphQLClient, type AuditReport } from "./audit.server";
+import {
+  runAudit,
+  type AdminGraphQLClient,
+  type AuditReport,
+} from "./audit.server";
 import { sendAuditAlertEmail, type SendAlertResult } from "./email.server";
 
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -18,10 +22,15 @@ export interface DueShop {
 export interface WeeklyAlertDeps {
   now: () => Date;
   findDueShops: (dueBefore: Date) => Promise<DueShop[]>;
-  getAdmin: (
+  getAdmin: (shop: string) => Promise<{
+    admin: AdminGraphQLClient;
+    fallbackEmail: () => Promise<string>;
+  } | null>;
+  audit: (
+    admin: AdminGraphQLClient,
     shop: string,
-  ) => Promise<{ admin: AdminGraphQLClient; fallbackEmail: () => Promise<string> } | null>;
-  audit: (admin: AdminGraphQLClient, shop: string, s: DueShop) => Promise<AuditReport>;
+    s: DueShop,
+  ) => Promise<AuditReport>;
   send: (to: string, report: AuditReport) => Promise<SendAlertResult>;
   markSent: (shop: string, at: Date) => Promise<void>;
   sleep: (ms: number) => Promise<void>;
@@ -35,10 +44,17 @@ export interface WeeklyAlertSummary {
   failed: number;
 }
 
-export async function runWeeklyAlerts(deps: WeeklyAlertDeps): Promise<WeeklyAlertSummary> {
+export async function runWeeklyAlerts(
+  deps: WeeklyAlertDeps,
+): Promise<WeeklyAlertSummary> {
   const now = deps.now();
   const due = await deps.findDueShops(new Date(now.getTime() - WEEK_MS));
-  const summary: WeeklyAlertSummary = { due: due.length, sent: 0, skipped: 0, failed: 0 };
+  const summary: WeeklyAlertSummary = {
+    due: due.length,
+    sent: 0,
+    skipped: 0,
+    failed: 0,
+  };
 
   for (const [i, s] of due.entries()) {
     if (i > 0) await deps.sleep(BETWEEN_SHOPS_MS);
@@ -66,7 +82,9 @@ export async function runWeeklyAlerts(deps: WeeklyAlertDeps): Promise<WeeklyAler
       summary.sent++;
     } catch (err) {
       summary.failed++;
-      deps.log(`[weekly-alerts] ${s.shop}: failed: ${err instanceof Error ? err.message : String(err)}`);
+      deps.log(
+        `[weekly-alerts] ${s.shop}: failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
   return summary;
@@ -87,7 +105,10 @@ async function realDeps(): Promise<WeeklyAlertDeps> {
       const rows = await db.shopSettings.findMany({
         where: {
           weeklyAlertEnabled: true,
-          OR: [{ lastWeeklyAlertAt: null }, { lastWeeklyAlertAt: { lte: dueBefore } }],
+          OR: [
+            { lastWeeklyAlertAt: null },
+            { lastWeeklyAlertAt: { lte: dueBefore } },
+          ],
         },
       });
       return rows.map((r) => ({
@@ -98,14 +119,18 @@ async function realDeps(): Promise<WeeklyAlertDeps> {
       }));
     },
     getAdmin: async (shop) => {
-      const hasSession = await db.session.findFirst({ where: { shop, isOnline: false } });
+      const hasSession = await db.session.findFirst({
+        where: { shop, isOnline: false },
+      });
       if (!hasSession) return null;
       const { admin } = await unauthenticated.admin(shop);
       return {
         admin: admin as unknown as AdminGraphQLClient,
         fallbackEmail: async () => {
           const res = await admin.graphql(SHOP_EMAIL_QUERY);
-          const data = (await res.json()) as { data?: { shop?: { email?: string } } };
+          const data = (await res.json()) as {
+            data?: { shop?: { email?: string } };
+          };
           return data.data?.shop?.email ?? "";
         },
       };
@@ -117,7 +142,10 @@ async function realDeps(): Promise<WeeklyAlertDeps> {
       }),
     send: sendAuditAlertEmail,
     markSent: async (shop, at) => {
-      await db.shopSettings.update({ where: { shop }, data: { lastWeeklyAlertAt: at } });
+      await db.shopSettings.update({
+        where: { shop },
+        data: { lastWeeklyAlertAt: at },
+      });
     },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log: (m) => console.log(m),
@@ -145,7 +173,10 @@ export function startWeeklyAlertScheduler(): void {
     try {
       const deps = await realDeps();
       const s = await runWeeklyAlerts(deps);
-      if (s.due > 0) console.log(`[weekly-alerts] due=${s.due} sent=${s.sent} skipped=${s.skipped} failed=${s.failed}`);
+      if (s.due > 0)
+        console.log(
+          `[weekly-alerts] due=${s.due} sent=${s.sent} skipped=${s.skipped} failed=${s.failed}`,
+        );
     } catch (err) {
       console.error("[weekly-alerts] tick failed:", err);
     } finally {
